@@ -52,6 +52,7 @@ pub struct LayerConfig {
 #[derive(Debug, Clone)]
 pub struct CreatureBehaviorConfig {
     pub respawn_delay_ms: u64,
+    pub count_scale: f64,
 }
 
 #[derive(Debug, Clone)]
@@ -63,10 +64,11 @@ pub struct TankConfig {
 pub fn load_config(path: &Path) -> Result<AppConfig> {
     let source =
         fs::read_to_string(path).wrap_err_with(|| format!("reading {}", path.display()))?;
-    let doc = source
+    let parse_source = normalize_config_kdl(&source);
+    let doc = parse_source
         .parse::<KdlDocument>()
         .wrap_err_with(|| format!("parsing {}", path.display()))
-        .with_section(|| source.clone().header("KDL source"))?;
+        .with_section(|| parse_source.clone().header("KDL source"))?;
 
     parse_config(&doc)
 }
@@ -132,6 +134,10 @@ fn parse_creatures(node: &KdlNode) -> Result<CreatureBehaviorConfig> {
     assert_prop(respawn, "condition", "after-exit-world")?;
     Ok(CreatureBehaviorConfig {
         respawn_delay_ms: prop_u64(respawn, "delay-ms")?,
+        count_scale: optional_child(node, "count-scale")
+            .map(|node| arg_non_negative_float(node, 0))
+            .transpose()?
+            .unwrap_or(1.0),
     })
 }
 
@@ -151,10 +157,39 @@ fn child<'a>(node: &'a KdlNode, name: &str) -> Result<&'a KdlNode> {
         })
 }
 
+fn optional_child<'a>(node: &'a KdlNode, name: &str) -> Option<&'a KdlNode> {
+    node.children().and_then(|children| children.get(name))
+}
+
 fn arg_string(node: &KdlNode, index: usize) -> Result<&str> {
     node.get(index)
         .and_then(KdlValue::as_string)
         .ok_or_else(|| eyre!("`{}` requires string argument {index}", node.name().value()))
+}
+
+fn arg_non_negative_float(node: &KdlNode, index: usize) -> Result<f64> {
+    let value = node
+        .get(index)
+        .and_then(|value| {
+            value
+                .as_float()
+                .or_else(|| value.as_integer().map(|int| int as f64))
+        })
+        .ok_or_else(|| {
+            eyre!(
+                "`{}` requires numeric argument {index}",
+                node.name().value()
+            )
+        })?;
+
+    if value.is_finite() && value >= 0.0 {
+        Ok(value)
+    } else {
+        Err(eyre!(
+            "`{}` argument {index} must be a finite non-negative number",
+            node.name().value()
+        ))
+    }
 }
 
 fn prop_string<'a>(node: &'a KdlNode, name: &str) -> Result<&'a str> {
@@ -254,6 +289,25 @@ fn parse_color(name: &str) -> Result<Color> {
     }
 }
 
+fn normalize_config_kdl(source: &str) -> String {
+    source
+        .lines()
+        .map(|line| {
+            let indent_len = line.len() - line.trim_start().len();
+            let (indent, trimmed) = line.split_at(indent_len);
+            if let Some(value) = trimmed
+                .strip_prefix("count-scale")
+                .and_then(|rest| rest.trim_start().strip_prefix('='))
+            {
+                format!("{indent}count-scale {}", value.trim_start())
+            } else {
+                line.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -267,7 +321,16 @@ mod tests {
         assert_eq!(config.reef.horizontal.offscreen_pages, 0.5);
         assert!(!config.reef.vertical.scroll_enabled);
         assert_eq!(config.reef.creatures.respawn_delay_ms, 1000);
+        assert_eq!(config.reef.creatures.count_scale, 2.0);
         assert_eq!(config.tank.width, 120);
         assert_eq!(config.tank.height, 40);
+    }
+
+    #[test]
+    fn normalizes_count_scale_assignment() {
+        assert_eq!(
+            normalize_config_kdl("creatures {\n    count-scale = 2.0\n}"),
+            "creatures {\n    count-scale 2.0\n}"
+        );
     }
 }

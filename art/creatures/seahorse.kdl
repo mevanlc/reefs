@@ -1,6 +1,6 @@
 name "seahorse"
 
-n=4
+count=4
 
 left ###"""
  -'\

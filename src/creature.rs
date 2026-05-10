@@ -1,6 +1,7 @@
 use std::{
     fs,
     path::Path,
+    str::FromStr,
     time::{Duration, Instant},
 };
 
@@ -22,6 +23,9 @@ pub struct CreatureDef {
     h_velocity: Option<i16>,
     v_velocity: Option<i16>,
     pub brownian: bool,
+    pub colors: Vec<Color>,
+    default_movement: bool,
+    school_rearrange_chance: Option<f64>,
 }
 
 impl CreatureDef {
@@ -112,6 +116,18 @@ impl CreatureDef {
 
         (dx, dy)
     }
+
+    pub fn uses_default_movement(&self) -> bool {
+        self.default_movement
+    }
+
+    pub fn school_rearrange_chance(&self) -> Option<f64> {
+        self.school_rearrange_chance
+    }
+}
+
+pub fn default_movement_transition_chance() -> f64 {
+    1.0 - 0.5_f64.powf(1.0 / 200.0)
 }
 
 #[derive(Debug, Clone)]
@@ -120,6 +136,19 @@ pub struct Variant {
     pub art: Vec<String>,
     pub width: u16,
     pub height: u16,
+    pub school: Option<School>,
+}
+
+#[derive(Debug, Clone)]
+pub struct School {
+    pub unit: String,
+    pub units: Vec<SchoolUnit>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct SchoolUnit {
+    pub x: u16,
+    pub y: u16,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -136,7 +165,7 @@ pub enum SpawnLocation {
 }
 
 impl Variant {
-    fn from_kdl_node(pose: String, art: &str) -> Self {
+    fn from_kdl_node(pose: String, art: &str, unit: Option<&str>, unit_brownian: bool) -> Self {
         let art = art
             .trim_matches('\n')
             .lines()
@@ -152,11 +181,39 @@ impl Variant {
 
         Self {
             pose,
+            school: unit
+                .filter(|unit| unit_brownian && !unit.is_empty())
+                .map(|unit| School::from_art(unit, &art)),
             art,
             width,
             height,
         }
     }
+}
+
+impl School {
+    fn from_art(unit: &str, art: &[String]) -> Self {
+        let units = art
+            .iter()
+            .enumerate()
+            .flat_map(|(row, line)| unit_positions(line, unit).map(move |column| (column, row)))
+            .filter_map(|(column, row)| {
+                let x = u16::try_from(column).ok()?;
+                let y = u16::try_from(row).ok()?;
+                Some(SchoolUnit { x, y })
+            })
+            .collect();
+
+        Self {
+            unit: unit.to_string(),
+            units,
+        }
+    }
+}
+
+fn unit_positions<'a>(line: &'a str, unit: &'a str) -> impl Iterator<Item = usize> + 'a {
+    line.match_indices(unit)
+        .map(|(byte_index, _)| line[..byte_index].chars().count())
 }
 
 #[derive(Debug)]
@@ -172,6 +229,7 @@ pub struct Entity {
     pub pose_intent: PoseIntent,
     pub lateral_dx: i16,
     pub depth_swim_ticks: u8,
+    pub school_rearrangements: u64,
 }
 
 impl Entity {
@@ -185,6 +243,10 @@ impl Entity {
         if def.brownian && rng.random_bool(0.25) {
             self.dx = rng.random_range(-1..=1);
             self.dy = rng.random_range(-1..=1);
+        } else if def.uses_default_movement()
+            && rng.random_bool(default_movement_transition_chance())
+        {
+            self.toggle_vertical_motion(rng);
         }
 
         let max_x = (bounds.width.saturating_sub(variant.width).max(1) - 1) as i32;
@@ -228,6 +290,22 @@ impl Entity {
         self.pose_intent = PoseIntent::Lateral;
         self.depth_swim_ticks = 0;
     }
+
+    pub fn toggle_vertical_motion(&mut self, rng: &mut ThreadRng) {
+        self.dy = if self.dy == 0 {
+            if rng.random_bool(0.5) { -1 } else { 1 }
+        } else {
+            0
+        };
+    }
+
+    pub fn maybe_rearrange_school(&mut self, def: &CreatureDef, rng: &mut ThreadRng) {
+        if let Some(chance) = def.school_rearrange_chance()
+            && rng.random_bool(chance)
+        {
+            self.school_rearrangements = self.school_rearrangements.wrapping_add(1);
+        }
+    }
 }
 
 pub fn load_creatures(dir: &Path) -> Result<Vec<CreatureDef>> {
@@ -266,7 +344,24 @@ pub fn load_creature(path: &Path) -> Result<CreatureDef> {
         .to_string();
 
     let name = string_arg(&doc, "name").unwrap_or(fallback_name);
-    let brownian = string_arg(&doc, "unit-motion").is_some_and(|motion| motion == "brownian");
+    let motion = string_arg(&doc, "motion");
+    let brownian = motion.as_deref().is_some_and(|motion| motion == "brownian");
+    let unit_motion = doc.get("unit-motion");
+    let unit_brownian = unit_motion
+        .and_then(|node| node.get(0))
+        .and_then(KdlValue::as_string)
+        .is_some_and(|motion| motion == "brownian");
+    let school_rearrange_chance = if unit_brownian {
+        Some(
+            optional_probability_prop(
+                unit_motion.expect("unit-motion exists"),
+                "rearrange-chance",
+            )?
+            .unwrap_or(0.33),
+        )
+    } else {
+        None
+    };
     let h_velocity = int_arg(&doc, "h-velocity").map(clamp_velocity);
     let v_velocity = int_arg(&doc, "v-velocity").map(clamp_velocity);
     let spawn_location = match string_arg(&doc, "spawn-location").as_deref() {
@@ -279,9 +374,14 @@ pub fn load_creature(path: &Path) -> Result<CreatureDef> {
             ));
         }
     };
-    let count = int_arg(&doc, "n")
+    let count = int_arg(&doc, "count")
         .and_then(|value| usize::try_from(value).ok())
         .unwrap_or(1);
+    let colors = parse_colors(&doc, path)?;
+    let default_movement = motion.is_none()
+        && h_velocity.is_none()
+        && v_velocity.is_none()
+        && spawn_location == SpawnLocation::Water;
     let variants = doc
         .nodes()
         .iter()
@@ -291,7 +391,13 @@ pub fn load_creature(path: &Path) -> Result<CreatureDef> {
                 return None;
             }
             let art = node.get(0)?.as_string()?;
-            Some(Variant::from_kdl_node(pose.to_string(), art))
+            let unit = node.get("unit").and_then(KdlValue::as_string);
+            Some(Variant::from_kdl_node(
+                pose.to_string(),
+                art,
+                unit,
+                unit_brownian,
+            ))
         })
         .collect::<Vec<_>>();
 
@@ -312,6 +418,9 @@ pub fn load_creature(path: &Path) -> Result<CreatureDef> {
         h_velocity,
         v_velocity,
         brownian,
+        colors,
+        default_movement,
+        school_rearrange_chance,
     })
 }
 
@@ -358,6 +467,49 @@ fn int_arg(doc: &KdlDocument, node_name: &str) -> Option<i128> {
         .and_then(KdlValue::as_integer)
 }
 
+fn parse_colors(doc: &KdlDocument, path: &Path) -> Result<Vec<Color>> {
+    let Some(node) = doc.get("colors") else {
+        return Ok(Vec::new());
+    };
+
+    node.entries()
+        .iter()
+        .filter(|entry| entry.name().is_none())
+        .map(|entry| {
+            let value = entry
+                .value()
+                .as_string()
+                .ok_or_else(|| eyre!("{} `colors` entries must be strings", path.display()))?;
+            Color::from_str(value)
+                .map_err(|_| eyre!("{} has unsupported color {value:?}", path.display()))
+        })
+        .collect()
+}
+
+fn optional_probability_prop(node: &kdl::KdlNode, name: &str) -> Result<Option<f64>> {
+    let Some(value) = node.get(name) else {
+        return Ok(None);
+    };
+    let Some(value) = value
+        .as_float()
+        .or_else(|| value.as_integer().map(|int| int as f64))
+    else {
+        return Err(eyre!(
+            "`{}` property `{name}` must be a number from 0.0 to 1.0",
+            node.name().value()
+        ));
+    };
+
+    if !(0.0..=1.0).contains(&value) {
+        return Err(eyre!(
+            "`{}` property `{name}` must be from 0.0 to 1.0, got {value}",
+            node.name().value()
+        ));
+    }
+
+    Ok(Some(value))
+}
+
 fn clamp_velocity(value: i128) -> i16 {
     value.clamp(-1, 1) as i16
 }
@@ -369,11 +521,13 @@ fn normalize_creature_kdl(source: &str) -> String {
             let trimmed = line.trim_start();
             let indent_len = line.len() - trimmed.len();
             let indent = &line[..indent_len];
-            if let Some(value) = trimmed.strip_prefix("n=")
+            if let Some(value) = trimmed.strip_prefix("count=")
                 && !value.is_empty()
                 && value.chars().all(|ch| ch.is_ascii_digit())
             {
-                format!("{indent}n {value}")
+                format!("{indent}count {value}")
+            } else if trimmed.starts_with("colors ") {
+                format!("{indent}{}", trimmed.replace(',', ""))
             } else {
                 line.to_string()
             }
@@ -401,9 +555,10 @@ mod tests {
     }
 
     #[test]
-    fn turtle_has_left_and_right_animation_variants() {
-        let turtle = load_creature(Path::new("art/creatures/turtle.kdl")).expect("turtle loads");
-        let poses = turtle
+    fn bertrand_has_left_and_right_animation_variants() {
+        let bertrand =
+            load_creature(Path::new("art/creatures/bertrand.kdl")).expect("bertrand loads");
+        let poses = bertrand
             .variants
             .iter()
             .map(|variant| variant.pose.as_str())
@@ -418,6 +573,23 @@ mod tests {
     }
 
     #[test]
+    fn parses_creature_colors() {
+        let bertrand =
+            load_creature(Path::new("art/creatures/bertrand.kdl")).expect("bertrand loads");
+
+        assert_eq!(
+            bertrand.colors,
+            vec![
+                Color::Rgb(0xeb, 0xbe, 0x0f),
+                Color::Rgb(0x8b, 0xc7, 0x14),
+                Color::Rgb(0x80, 0x9b, 0x41),
+                Color::Rgb(0x41, 0x4f, 0xbf),
+                Color::Rgb(0x83, 0x67, 0xc3),
+            ]
+        );
+    }
+
+    #[test]
     fn absent_creature_count_defaults_to_one() {
         let bumble = load_creature(Path::new("art/creatures/bumble.kdl")).expect("bumble loads");
 
@@ -426,16 +598,47 @@ mod tests {
 
     #[test]
     fn explicit_zero_creature_count_means_spawn_only() {
-        let turtle = load_creature(Path::new("art/creatures/turtle.kdl")).expect("turtle loads");
+        let path = write_test_creature(
+            "zero-count",
+            r####"
+name "zero-count"
+count=0
 
-        assert_eq!(turtle.count, 0);
+face ###"""
+<>
+"""###
+"####,
+        );
+        let creature = load_creature(&path).expect("zero-count loads");
+
+        assert_eq!(creature.count, 0);
     }
 
     #[test]
-    fn creature_count_comes_from_n_param() {
+    fn creature_count_comes_from_count_param() {
         let boxfish = load_creature(Path::new("art/creatures/boxfish.kdl")).expect("boxfish loads");
 
         assert_eq!(boxfish.count, 2);
+    }
+
+    #[test]
+    fn default_movement_is_only_for_unspecified_water_creatures() {
+        let bumble = load_creature(Path::new("art/creatures/bumble.kdl")).expect("bumble loads");
+        let squigs = load_creature(Path::new("art/creatures/squigs.kdl")).expect("squigs loads");
+        let wort =
+            load_creature(Path::new("art/creatures/wigglewort.kdl")).expect("wigglewort loads");
+
+        assert!(bumble.uses_default_movement());
+        assert!(!squigs.uses_default_movement());
+        assert!(!wort.uses_default_movement());
+    }
+
+    #[test]
+    fn default_movement_transition_is_even_odds_across_200_columns() {
+        let chance = default_movement_transition_chance();
+        let chance_over_200_columns = 1.0 - (1.0 - chance).powi(200);
+
+        assert!((chance_over_200_columns - 0.5).abs() < 0.000_000_000_001);
     }
 
     #[test]
@@ -483,10 +686,102 @@ mod tests {
     }
 
     #[test]
-    fn normalizes_compact_n_param_for_kdl_parser() {
-        assert_eq!(
-            normalize_creature_kdl("name \"bee\"\n\nn=2\n"),
-            "name \"bee\"\n\nn 2"
+    fn parses_school_local_brownian_units() {
+        let squigs = load_creature(Path::new("art/creatures/squigs.kdl")).expect("squigs loads");
+        let variant = squigs.best_variant_for(0, PoseIntent::Face, 0, 0);
+        let school = variant.school.as_ref().expect("squigs has school units");
+
+        assert!(squigs.brownian);
+        assert!(squigs.school_rearrange_chance().is_some());
+        assert_eq!(school.unit, "~");
+        assert_eq!(school.units.len(), 9);
+        assert_school_units_fit_bbox(variant);
+    }
+
+    #[test]
+    fn parses_multichar_school_units_for_each_pose() {
+        let oldskool =
+            load_creature(Path::new("art/creatures/oldskool.kdl")).expect("oldskool loads");
+
+        assert!(oldskool.brownian);
+        assert!(oldskool.school_rearrange_chance().is_some());
+        for variant in &oldskool.variants {
+            let school = variant.school.as_ref().expect("oldskool has school units");
+
+            assert_eq!(school.units.len(), 9);
+            assert_eq!(school.unit.chars().count(), 3);
+            assert_school_units_fit_bbox(variant);
+        }
+    }
+
+    #[test]
+    fn school_rearrangement_chance_is_configurable() {
+        let path = write_test_creature(
+            "school-chance",
+            r####"
+name "school-chance"
+unit-motion "brownian" rearrange-chance=0.75
+
+face ###"""
+o o
+"""### unit="o"
+"####,
         );
+        let creature = load_creature(&path).expect("school chance loads");
+
+        assert_eq!(creature.school_rearrange_chance(), Some(0.75));
+    }
+
+    #[test]
+    fn normalizes_compact_count_param_for_kdl_parser() {
+        assert_eq!(
+            normalize_creature_kdl("name \"bee\"\n\ncount=2\n"),
+            "name \"bee\"\n\ncount 2"
+        );
+    }
+
+    #[test]
+    fn normalizes_comma_separated_colors_for_kdl_parser() {
+        assert_eq!(
+            normalize_creature_kdl("colors \"#fff\", \"#000\"\n"),
+            "colors \"#fff\" \"#000\""
+        );
+    }
+
+    fn assert_school_units_fit_bbox(variant: &Variant) {
+        let expected_width = variant
+            .art
+            .iter()
+            .map(|line| line.chars().count())
+            .max()
+            .unwrap_or_default();
+        let expected_height = variant.art.len();
+        let school = variant.school.as_ref().expect("variant has school units");
+        let unit_width = school.unit.chars().count() as u16;
+
+        assert_eq!(variant.width as usize, expected_width);
+        assert_eq!(variant.height as usize, expected_height);
+        assert!(
+            school
+                .units
+                .iter()
+                .all(|unit| unit.x.saturating_add(unit_width) <= variant.width
+                    && unit.y < variant.height)
+        );
+    }
+
+    fn write_test_creature(name: &str, source: &str) -> std::path::PathBuf {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock is after epoch")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "reefs-creature-test-{}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).expect("test creature dir created");
+        let path = dir.join(format!("{name}.kdl"));
+        fs::write(&path, source.trim_start()).expect("test creature written");
+        path
     }
 }

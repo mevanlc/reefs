@@ -1,6 +1,6 @@
 name "bee"
 
-n=2
+count=2
 
 left ###"""
   __

@@ -1,7 +1,7 @@
 name "squigs"
 
 motion "brownian"
-unit-motion "brownian"
+unit-motion "brownian" rearrange-chance=0.2
 
 face ###"""
    ~ ~

@@ -15,8 +15,8 @@ use crate::{
 };
 
 const DEFAULT_TICK_RATE: Duration = Duration::from_millis(140);
-const MIN_TICK_RATE: Duration = Duration::from_millis(30);
-const MAX_TICK_RATE: Duration = Duration::from_millis(500);
+const MIN_TICK_RATE: Duration = Duration::from_millis(10);
+const MAX_TICK_RATE: Duration = Duration::from_millis(3000);
 const TICK_RATE_STEP: Duration = Duration::from_millis(20);
 const SCROLL_STEP: i32 = 4;
 
@@ -25,6 +25,7 @@ pub struct App {
     pub(crate) entities: Vec<Entity>,
     pub(crate) tick: u64,
     pub(crate) show_background: bool,
+    pub(crate) show_creature_names: bool,
     pub(crate) mode: RuntimeMode,
     pub(crate) spawn_modal: Option<SpawnModal>,
     tick_rate: Duration,
@@ -97,6 +98,10 @@ impl App {
         definitions: Vec<CreatureDef>,
         launch_area: Rect,
     ) -> Result<Self> {
+        let initial_count_scale = match config.mode {
+            Mode::Reef => config.reef.creatures.count_scale,
+            Mode::Tank => 1.0,
+        };
         let mode = match config.mode {
             Mode::Tank => RuntimeMode::Tank(TankState {
                 width: config.tank.width,
@@ -132,11 +137,12 @@ impl App {
             entities: Vec::new(),
             tick: 0,
             show_background: false,
+            show_creature_names: false,
             mode,
             spawn_modal: None,
             tick_rate: DEFAULT_TICK_RATE,
         };
-        app.spawn_initial_entities(launch_area);
+        app.spawn_initial_entities(launch_area, initial_count_scale);
         Ok(app)
     }
 
@@ -183,11 +189,12 @@ impl App {
         }
     }
 
-    fn spawn_initial_entities(&mut self, launch_area: Rect) {
+    fn spawn_initial_entities(&mut self, launch_area: Rect, count_scale: f64) {
         let mut rng = rand::rng();
 
         for def_index in 0..self.definitions.len() {
-            for copy_index in 0..self.definitions[def_index].count {
+            let count = scaled_initial_count(self.definitions[def_index].count, count_scale);
+            for copy_index in 0..count {
                 let entity = match &self.mode {
                     RuntimeMode::Tank(tank) => {
                         spawn_tank_entity(&self.definitions, def_index, copy_index, tank, &mut rng)
@@ -215,6 +222,7 @@ impl App {
                 let bounds = Rect::new(0, 0, tank.width - 2, tank.height - 2);
                 for entity in &mut self.entities {
                     let def = &self.definitions[entity.def];
+                    entity.maybe_rearrange_school(def, &mut rng);
                     let variant = def.best_variant(entity.dx, self.tick, entity.phase);
                     entity.tick_bounded(def, bounds, variant, &mut rng);
                 }
@@ -261,6 +269,7 @@ impl App {
         match key.code {
             KeyCode::Char('q') | KeyCode::Esc => return true,
             KeyCode::Char('b') => self.show_background = !self.show_background,
+            KeyCode::Char('t') => self.show_creature_names = !self.show_creature_names,
             KeyCode::Char('+') => self.spawn_random_creature(),
             KeyCode::Char('-') => self.despawn_random_creature(),
             KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -290,7 +299,6 @@ impl App {
                 if let Some(modal) = self.spawn_modal {
                     self.spawn_creature(modal.selected);
                 }
-                self.spawn_modal = None;
             }
             _ => {}
         }
@@ -321,12 +329,18 @@ impl App {
     }
 
     fn spawn_random_creature(&mut self) {
-        if self.definitions.is_empty() {
+        let spawnable = self
+            .definitions
+            .iter()
+            .enumerate()
+            .filter_map(|(index, definition)| (definition.count > 0).then_some(index))
+            .collect::<Vec<_>>();
+        if spawnable.is_empty() {
             return;
         }
 
         let mut rng = rand::rng();
-        let def_index = rng.random_range(0..self.definitions.len());
+        let def_index = spawnable[rng.random_range(0..spawnable.len())];
         self.spawn_creature(def_index);
     }
 
@@ -384,6 +398,14 @@ impl App {
     }
 }
 
+fn scaled_initial_count(count: usize, scale: f64) -> usize {
+    if scale <= 0.0 {
+        0
+    } else {
+        ((count as f64) * scale).round().min(usize::MAX as f64) as usize
+    }
+}
+
 fn tick_reef(
     definitions: &[CreatureDef],
     entities: &mut [Entity],
@@ -422,11 +444,13 @@ fn tick_reef(
             entity.pose_intent = replacement.pose_intent;
             entity.lateral_dx = replacement.lateral_dx;
             entity.depth_swim_ticks = replacement.depth_swim_ticks;
+            entity.school_rearrangements = replacement.school_rearrangements;
             entity.respawn_at = None;
             continue;
         }
 
         let def = &definitions[entity.def];
+        entity.maybe_rearrange_school(def, rng);
         if def.spawn_location == SpawnLocation::Floor {
             let variant = def.best_variant_for(0, PoseIntent::Lateral, tick, entity.phase);
             entity.dx = 0;
@@ -469,6 +493,10 @@ fn update_reef_motion(def: &CreatureDef, entity: &mut Entity, rng: &mut ThreadRn
     } else if def.brownian && rng.random_bool(0.25) {
         entity.dx = rng.random_range(-1..=1);
         entity.dy = rng.random_range(-1..=1);
+    } else if def.uses_default_movement()
+        && rng.random_bool(crate::creature::default_movement_transition_chance())
+    {
+        entity.toggle_vertical_motion(rng);
     }
 }
 
@@ -584,11 +612,12 @@ fn spawn_tank_entity(
         dx,
         dy,
         phase: rng.random_range(0..8),
-        color: entity_color(definitions, def_index, copy_index),
+        color: entity_color(definitions, def_index, copy_index, rng),
         respawn_at: None,
         pose_intent: PoseIntent::Lateral,
         lateral_dx: dx,
         depth_swim_ticks: 0,
+        school_rearrangements: 0,
     }
 }
 
@@ -641,15 +670,26 @@ fn spawn_reef_entity(
         dx,
         dy,
         phase: rng.random_range(0..8),
-        color: entity_color(definitions, def_index, copy_index),
+        color: entity_color(definitions, def_index, copy_index, rng),
         respawn_at: None,
         pose_intent: PoseIntent::Lateral,
         lateral_dx: dx,
         depth_swim_ticks: 0,
+        school_rearrangements: 0,
     }
 }
 
-fn entity_color(definitions: &[CreatureDef], def_index: usize, copy_index: usize) -> Color {
+fn entity_color(
+    definitions: &[CreatureDef],
+    def_index: usize,
+    copy_index: usize,
+    rng: &mut ThreadRng,
+) -> Color {
+    let def = &definitions[def_index];
+    if !def.colors.is_empty() {
+        return def.colors[rng.random_range(0..def.colors.len())];
+    }
+
     let colors = [
         Color::LightCyan,
         Color::LightBlue,
@@ -661,7 +701,7 @@ fn entity_color(definitions: &[CreatureDef], def_index: usize, copy_index: usize
         Color::Yellow,
         Color::White,
     ];
-    let name_hash = definitions[def_index]
+    let name_hash = def
         .name
         .bytes()
         .fold(0usize, |hash, byte| hash.wrapping_add(byte as usize));
@@ -701,6 +741,7 @@ mod tests {
             art: vec!["xx".to_string(), "xx".to_string()],
             width: 2,
             height: 2,
+            school: None,
         };
         let band = WaterBand { top: 1, bottom: 5 };
 
@@ -714,6 +755,7 @@ mod tests {
             art: vec!["xx".to_string()],
             width: 2,
             height: 1,
+            school: None,
         };
         let bounds = WorldBounds {
             start: -10,
@@ -731,6 +773,7 @@ mod tests {
             pose_intent: PoseIntent::Lateral,
             lateral_dx: -1,
             depth_swim_ticks: 0,
+            school_rearrangements: 0,
         };
 
         assert!(!entity_exited(&entity, &variant, bounds));
@@ -757,6 +800,7 @@ mod tests {
             pose_intent: PoseIntent::FaceAway,
             lateral_dx: -1,
             depth_swim_ticks: 2,
+            school_rearrangements: 0,
         };
 
         update_four_way_swim(&mut entity, &mut rng);
@@ -819,32 +863,84 @@ mod tests {
     }
 
     #[test]
+    fn spawned_creatures_use_their_defined_colors() {
+        let config = load_config("config.kdl".as_ref()).expect("config loads");
+        let definitions = load_creatures("art/creatures".as_ref()).expect("creatures load");
+        let mut app = App::new(config, definitions, Rect::new(0, 0, 120, 40)).expect("app starts");
+        let bertrand = app
+            .definitions
+            .iter()
+            .position(|definition| definition.name == "bertrand")
+            .expect("bertrand definition exists");
+
+        app.spawn_creature(bertrand);
+        let entity = app
+            .entities
+            .iter()
+            .find(|entity| entity.def == bertrand)
+            .expect("bertrand spawned");
+
+        assert!(app.definitions[bertrand].colors.contains(&entity.color));
+    }
+
+    #[test]
+    fn initial_spawn_counts_use_config_count_scale() {
+        let config = load_config("config.kdl".as_ref()).expect("config loads");
+        let definitions = load_creatures("art/creatures".as_ref()).expect("creatures load");
+        let expected = definitions
+            .iter()
+            .map(|definition| {
+                scaled_initial_count(definition.count, config.reef.creatures.count_scale)
+            })
+            .sum::<usize>();
+        let app = App::new(config, definitions, Rect::new(0, 0, 120, 40)).expect("app starts");
+
+        assert_eq!(app.entities.len(), expected);
+    }
+
+    #[test]
     fn zero_count_creatures_do_not_spawn_initially_but_can_be_spawned() {
         let config = load_config("config.kdl".as_ref()).expect("config loads");
         let definitions = load_creatures("art/creatures".as_ref()).expect("creatures load");
         let mut app = App::new(config, definitions, Rect::new(0, 0, 120, 40)).expect("app starts");
-        let turtle = app
-            .definitions
-            .iter()
-            .position(|definition| definition.name == "turtle")
-            .expect("turtle definition exists");
+        let zero_count = zero_count_definition(&app);
 
         assert_eq!(
             app.entities
                 .iter()
-                .filter(|entity| entity.def == turtle)
+                .filter(|entity| entity.def == zero_count)
                 .count(),
             0
         );
 
-        app.spawn_creature(turtle);
+        app.spawn_creature(zero_count);
 
         assert_eq!(
             app.entities
                 .iter()
-                .filter(|entity| entity.def == turtle)
+                .filter(|entity| entity.def == zero_count)
                 .count(),
             1
+        );
+    }
+
+    #[test]
+    fn random_spawn_excludes_zero_count_creatures() {
+        let config = load_config("config.kdl".as_ref()).expect("config loads");
+        let definitions = load_creatures("art/creatures".as_ref()).expect("creatures load");
+        let mut app = App::new(config, definitions, Rect::new(0, 0, 120, 40)).expect("app starts");
+        let zero_count = zero_count_definition(&app);
+
+        for _ in 0..100 {
+            app.spawn_random_creature();
+        }
+
+        assert_eq!(
+            app.entities
+                .iter()
+                .filter(|entity| entity.def == zero_count)
+                .count(),
+            0
         );
     }
 
@@ -876,12 +972,27 @@ mod tests {
         let before_selected = app.entities.iter().filter(|entity| entity.def == 1).count();
         app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
 
-        assert!(app.spawn_modal.is_none());
+        assert_eq!(app.spawn_modal.map(|modal| modal.selected), Some(1));
         assert_eq!(app.entities.len(), before_total + 1);
         assert_eq!(
             app.entities.iter().filter(|entity| entity.def == 1).count(),
             before_selected + 1
         );
+    }
+
+    #[test]
+    fn t_toggles_creature_names() {
+        let config = load_config("config.kdl".as_ref()).expect("config loads");
+        let definitions = load_creatures("art/creatures".as_ref()).expect("creatures load");
+        let mut app = App::new(config, definitions, Rect::new(0, 0, 120, 40)).expect("app starts");
+
+        assert!(!app.show_creature_names);
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE));
+        assert!(app.show_creature_names);
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE));
+        assert!(!app.show_creature_names);
     }
 
     #[test]
@@ -897,5 +1008,22 @@ mod tests {
 
         app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::SHIFT));
         assert_eq!(app.tick_rate, DEFAULT_TICK_RATE);
+
+        for _ in 0..20 {
+            app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::SHIFT));
+        }
+        assert_eq!(app.tick_rate, MIN_TICK_RATE);
+
+        for _ in 0..200 {
+            app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::SHIFT));
+        }
+        assert_eq!(app.tick_rate, MAX_TICK_RATE);
+    }
+
+    fn zero_count_definition(app: &App) -> usize {
+        app.definitions
+            .iter()
+            .position(|definition| definition.count == 0)
+            .expect("at least one count=0 creature definition exists")
     }
 }

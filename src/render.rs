@@ -1,5 +1,6 @@
 use ratatui::{
     Frame,
+    buffer::Buffer,
     layout::Rect,
     style::{Color, Modifier, Style, Stylize},
     text::Line,
@@ -8,7 +9,7 @@ use ratatui::{
 
 use crate::{
     app::{App, RuntimeMode, TankState, WaterBand},
-    creature::{CreatureDef, Entity},
+    creature::{CreatureDef, Entity, School, Variant},
     world::ReefWorld,
 };
 
@@ -55,9 +56,10 @@ fn render_tank(frame: &mut Frame<'_>, area: Rect, app: &App, tank_state: &TankSt
     let block = Block::new()
         .title(" Aquariuma ")
         .title_bottom(format!(
-            " {} creatures | b {} | q quit ",
+            " {} creatures | b {} | t names {} | q quit ",
             app.entities.len(),
-            background_state
+            background_state,
+            if app.show_creature_names { "on" } else { "off" }
         ))
         .borders(Borders::ALL)
         .border_style(Style::new().fg(Color::Blue))
@@ -67,7 +69,15 @@ fn render_tank(frame: &mut Frame<'_>, area: Rect, app: &App, tank_state: &TankSt
     if app.show_background {
         render_water(frame, water, app.tick);
     }
-    render_creatures(frame, water, &app.definitions, &app.entities, app.tick, 0);
+    render_creatures(
+        frame,
+        water,
+        &app.definitions,
+        &app.entities,
+        app.tick,
+        0,
+        app.show_creature_names,
+    );
 }
 
 fn render_reef(frame: &mut Frame<'_>, area: Rect, app: &App, world: &ReefWorld) {
@@ -91,6 +101,7 @@ fn render_reef(frame: &mut Frame<'_>, area: Rect, app: &App, world: &ReefWorld) 
         &app.entities,
         app.tick,
         world.viewport_x,
+        app.show_creature_names,
     );
 }
 
@@ -223,6 +234,7 @@ fn render_creatures(
     entities: &[Entity],
     tick: u64,
     viewport_x: i32,
+    show_names: bool,
 ) {
     let buffer = frame.buffer_mut();
 
@@ -239,33 +251,198 @@ fn render_creatures(
             Modifier::empty()
         });
 
-        for (line_index, line) in variant.art.iter().enumerate() {
-            let y = area.y as i32 + entity.y + line_index as i32;
-            if y < area.y as i32 || y >= area.bottom() as i32 {
-                continue;
-            }
+        if let Some(school) = &variant.school {
+            render_school(buffer, area, entity, variant, school, viewport_x, style);
+        } else {
+            render_static_art(buffer, area, entity, variant, viewport_x, style);
+        }
 
-            let raw_x = area.x as i32 + entity.x - viewport_x;
-            if raw_x >= area.right() as i32 {
-                continue;
-            }
-
-            let (x, text) = if raw_x < area.x as i32 {
-                let skip = (area.x as i32 - raw_x) as usize;
-                let clipped = line.chars().skip(skip).collect::<String>();
-                (area.x, clipped)
-            } else {
-                (raw_x as u16, line.clone())
-            };
-
-            if text.is_empty() || x >= area.right() {
-                continue;
-            }
-
-            let width = area.right().saturating_sub(x) as usize;
-            buffer.set_stringn(x, y as u16, text, width, style);
+        if show_names {
+            render_creature_name(
+                buffer,
+                area,
+                entity,
+                variant.width,
+                variant.height,
+                &def.name,
+                viewport_x,
+            );
         }
     }
+}
+
+fn render_static_art(
+    buffer: &mut Buffer,
+    area: Rect,
+    entity: &Entity,
+    variant: &Variant,
+    viewport_x: i32,
+    style: Style,
+) {
+    for (line_index, line) in variant.art.iter().enumerate() {
+        let y = area.y as i32 + entity.y + line_index as i32;
+        if y < area.y as i32 || y >= area.bottom() as i32 {
+            continue;
+        }
+
+        let raw_x = area.x as i32 + entity.x - viewport_x;
+        if raw_x >= area.right() as i32 {
+            continue;
+        }
+
+        let (x, text) = if raw_x < area.x as i32 {
+            let skip = (area.x as i32 - raw_x) as usize;
+            let clipped = line.chars().skip(skip).collect::<String>();
+            (area.x, clipped)
+        } else {
+            (raw_x as u16, line.clone())
+        };
+
+        if text.is_empty() || x >= area.right() {
+            continue;
+        }
+
+        let width = area.right().saturating_sub(x) as usize;
+        buffer.set_stringn(x, y as u16, text, width, style);
+    }
+}
+
+fn render_school(
+    buffer: &mut Buffer,
+    area: Rect,
+    entity: &Entity,
+    variant: &Variant,
+    school: &School,
+    viewport_x: i32,
+    style: Style,
+) {
+    let unit_width = school.unit.chars().count().max(1) as u16;
+    let max_x = variant.width.saturating_sub(unit_width) as u64;
+    let max_y = variant.height.saturating_sub(1) as u64;
+
+    for (index, unit) in school.units.iter().enumerate() {
+        let local_x = brownian_coordinate(
+            unit.x as u64,
+            max_x,
+            entity.school_rearrangements,
+            entity.phase,
+            index,
+            0,
+        );
+        let local_y = brownian_coordinate(
+            unit.y as u64,
+            max_y,
+            entity.school_rearrangements,
+            entity.phase,
+            index,
+            1,
+        );
+        let raw_x = area.x as i32 + entity.x - viewport_x + local_x as i32;
+        let y = area.y as i32 + entity.y + local_y as i32;
+        if y < area.y as i32 || y >= area.bottom() as i32 {
+            continue;
+        }
+
+        render_clipped_text(buffer, area, raw_x, y as u16, &school.unit, style);
+    }
+}
+
+fn brownian_coordinate(
+    origin: u64,
+    max: u64,
+    rearrangements: u64,
+    phase: usize,
+    unit_index: usize,
+    axis: u64,
+) -> u64 {
+    if max == 0 || rearrangements == 0 {
+        return origin.min(max);
+    }
+
+    let seed = rearrangements
+        .wrapping_add((phase as u64).wrapping_mul(0x9e37_79b9))
+        .wrapping_add((unit_index as u64).wrapping_mul(0x85eb_ca6b))
+        .wrapping_add(axis.wrapping_mul(0xc2b2_ae35));
+    let drift = stable_hash(seed) % (max + 1);
+
+    origin.wrapping_add(drift).wrapping_rem(max + 1)
+}
+
+fn stable_hash(mut value: u64) -> u64 {
+    value ^= value >> 33;
+    value = value.wrapping_mul(0xff51_afd7_ed55_8ccd);
+    value ^= value >> 33;
+    value = value.wrapping_mul(0xc4ce_b9fe_1a85_ec53);
+    value ^ (value >> 33)
+}
+
+fn render_clipped_text(
+    buffer: &mut Buffer,
+    area: Rect,
+    raw_x: i32,
+    y: u16,
+    text: &str,
+    style: Style,
+) {
+    let text_width = text.chars().count() as i32;
+    if text_width == 0 || raw_x >= area.right() as i32 || raw_x + text_width <= area.x as i32 {
+        return;
+    }
+
+    let (x, text) = if raw_x < area.x as i32 {
+        let skip = (area.x as i32 - raw_x) as usize;
+        (area.x, text.chars().skip(skip).collect::<String>())
+    } else {
+        (raw_x as u16, text.to_string())
+    };
+
+    if text.is_empty() || x >= area.right() {
+        return;
+    }
+
+    let width = area.right().saturating_sub(x) as usize;
+    buffer.set_stringn(x, y, text, width, style);
+}
+
+fn render_creature_name(
+    buffer: &mut Buffer,
+    area: Rect,
+    entity: &Entity,
+    creature_width: u16,
+    creature_height: u16,
+    name: &str,
+    viewport_x: i32,
+) {
+    let name_width = name.chars().count() as i32;
+    if name_width == 0 {
+        return;
+    }
+
+    let y = area.y as i32 + entity.y + creature_height as i32;
+    if y < area.y as i32 || y >= area.bottom() as i32 {
+        return;
+    }
+
+    let creature_center = area.x as i32 + entity.x - viewport_x + creature_width as i32 / 2;
+    let raw_x = creature_center - name_width / 2;
+    if raw_x >= area.right() as i32 || raw_x + name_width <= area.x as i32 {
+        return;
+    }
+
+    let (x, text) = if raw_x < area.x as i32 {
+        let skip = (area.x as i32 - raw_x) as usize;
+        (area.x, name.chars().skip(skip).collect::<String>())
+    } else {
+        (raw_x as u16, name.to_string())
+    };
+
+    if text.is_empty() || x >= area.right() {
+        return;
+    }
+
+    let width = area.right().saturating_sub(x) as usize;
+    let style = Style::new().fg(Color::LightCyan);
+    buffer.set_stringn(x, y as u16, text, width, style);
 }
 
 fn centered_rect(area: Rect, width: u16, height: u16) -> Rect {

@@ -1,6 +1,6 @@
 name "boxfish"
 
-n=2
+count=2
 
 right ###"""
   __
@@ -46,6 +46,6 @@ face-away ###"""
 
 face-away1 ###"""
   __
--|()|-
+_|()|_
  '--'
 """###
