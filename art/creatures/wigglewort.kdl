@@ -1,7 +1,11 @@
 name "wigglewort"
 
+n=3
+
 h-velocity 0
 v-velocity 0
+
+spawn-location floor
 
 face ###"""
 (

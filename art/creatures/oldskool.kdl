@@ -1,5 +1,6 @@
 name "oldskool"
 
+motion "brownian"
 unit-motion "brownian"
 
 left ###"""

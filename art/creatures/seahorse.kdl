@@ -1,5 +1,7 @@
 name "seahorse"
 
+n=4
+
 left ###"""
  -'\
    @

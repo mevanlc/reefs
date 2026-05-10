@@ -1,8 +1,7 @@
 name "squigs"
 
+motion "brownian"
 unit-motion "brownian"
-
-hitbox "autorect"
 
 face ###"""
    ~ ~

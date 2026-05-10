@@ -26,7 +26,7 @@ const TICK_RATE: Duration = Duration::from_millis(140);
 fn main() -> Result<()> {
     color_eyre::install()?;
 
-    let definitions = load_creatures(Path::new("creatures"))?;
+    let definitions = load_creatures(Path::new("art/creatures"))?;
     let mut terminal = ratatui::init();
     let result = App::new(definitions).run(&mut terminal);
     ratatui::restore();
@@ -478,7 +478,7 @@ mod tests {
 
     #[test]
     fn loads_all_creature_files() {
-        let creatures = load_creatures(Path::new("creatures")).expect("creatures load");
+        let creatures = load_creatures(Path::new("art/creatures")).expect("creatures load");
 
         assert!(creatures.len() >= 17);
         assert!(creatures.iter().any(|creature| creature.name == "boxfish"));
@@ -492,7 +492,7 @@ mod tests {
 
     #[test]
     fn turtle_has_left_and_right_animation_variants() {
-        let turtle = load_creature(Path::new("creatures/turtle.kdl")).expect("turtle loads");
+        let turtle = load_creature(Path::new("art/creatures/turtle.kdl")).expect("turtle loads");
         let poses = turtle
             .variants
             .iter()
