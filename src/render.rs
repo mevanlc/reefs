@@ -1,0 +1,278 @@
+use ratatui::{
+    Frame,
+    layout::Rect,
+    style::{Color, Modifier, Style, Stylize},
+    text::Line,
+    widgets::{Block, BorderType, Borders, Clear, Paragraph},
+};
+
+use crate::{
+    app::{App, RuntimeMode, TankState, WaterBand},
+    creature::{CreatureDef, Entity},
+    world::ReefWorld,
+};
+
+pub fn render(frame: &mut Frame<'_>, app: &App) {
+    let area = frame.area();
+    match &app.mode {
+        RuntimeMode::Tank(tank) => render_tank(frame, area, app, tank),
+        RuntimeMode::Reef(reef) => {
+            if area.height < reef.min_height {
+                render_size_warning(frame, area, reef.min_height);
+            } else {
+                render_reef(frame, area, app, &reef.world);
+            }
+        }
+    }
+
+    if app.spawn_modal.is_some() {
+        render_spawn_modal(frame, area, app);
+    }
+}
+
+fn render_tank(frame: &mut Frame<'_>, area: Rect, app: &App, tank_state: &TankState) {
+    if area.width < tank_state.width || area.height < tank_state.height {
+        let message = Paragraph::new(vec![
+            Line::from(format!(
+                "Aquariuma needs a {}x{} terminal.",
+                tank_state.width, tank_state.height
+            )),
+            Line::from(format!("Current size: {}x{}", area.width, area.height)),
+            Line::from("Resize the terminal, or press q / Esc to quit."),
+        ])
+        .style(Style::new().fg(Color::LightCyan));
+        frame.render_widget(message, area);
+        return;
+    }
+
+    let tank = centered_rect(area, tank_state.width, tank_state.height);
+    let water = Rect::new(tank.x + 1, tank.y + 1, tank.width - 2, tank.height - 2);
+    let background_state = if app.show_background {
+        "bg on"
+    } else {
+        "bg off"
+    };
+    let block = Block::new()
+        .title(" Aquariuma ")
+        .title_bottom(format!(
+            " {} creatures | b {} | q quit ",
+            app.entities.len(),
+            background_state
+        ))
+        .borders(Borders::ALL)
+        .border_style(Style::new().fg(Color::Blue))
+        .style(Style::new().bg(Color::Black));
+    frame.render_widget(block, tank);
+
+    if app.show_background {
+        render_water(frame, water, app.tick);
+    }
+    render_creatures(frame, water, &app.definitions, &app.entities, app.tick, 0);
+}
+
+fn render_reef(frame: &mut Frame<'_>, area: Rect, app: &App, world: &ReefWorld) {
+    if app.show_background {
+        let band = WaterBand::for_reef(world, area.height);
+        let water = Rect::new(
+            area.x,
+            area.y + band.top.max(0) as u16,
+            area.width,
+            (band.bottom - band.top).max(0) as u16,
+        );
+        render_water(frame, water, app.tick);
+    }
+
+    render_layer(frame, area, world, LayerPosition::Surface);
+    render_layer(frame, area, world, LayerPosition::Floor);
+    render_creatures(
+        frame,
+        area,
+        &app.definitions,
+        &app.entities,
+        app.tick,
+        world.viewport_x,
+    );
+}
+
+fn render_size_warning(frame: &mut Frame<'_>, area: Rect, min_height: u16) {
+    let message = Paragraph::new(vec![
+        Line::from("Aquariuma reef mode needs more rows."),
+        Line::from(format!("Minimum rows: {min_height}")),
+        Line::from(format!("Current rows: {}", area.height)),
+        Line::from("Resize the terminal, or press q / Esc to quit."),
+    ])
+    .style(Style::new().fg(Color::LightCyan));
+    frame.render_widget(message, area);
+}
+
+fn render_spawn_modal(frame: &mut Frame<'_>, area: Rect, app: &App) {
+    let Some(modal) = app.spawn_modal else {
+        return;
+    };
+
+    let width = area.width.clamp(24, 36);
+    let max_list_rows = area.height.saturating_sub(4).max(1);
+    let list_rows = (app.definitions.len() as u16).min(max_list_rows);
+    let height = list_rows.saturating_add(2).min(area.height).max(3);
+    let modal_area = centered_rect(area, width, height);
+    let visible_rows = modal_area.height.saturating_sub(2) as usize;
+    let selected = modal.selected.min(app.definitions.len().saturating_sub(1));
+    let start = selected
+        .saturating_add(1)
+        .saturating_sub(visible_rows)
+        .min(app.definitions.len().saturating_sub(visible_rows));
+    let end = app
+        .definitions
+        .len()
+        .min(start.saturating_add(visible_rows));
+    let lines = app.definitions[start..end]
+        .iter()
+        .enumerate()
+        .map(|(offset, definition)| {
+            let index = start + offset;
+            let count = app
+                .entities
+                .iter()
+                .filter(|entity| entity.def == index)
+                .count();
+            let label = format!(
+                "{} {} ({count})",
+                if index == selected { ">" } else { " " },
+                definition.name
+            );
+            if index == selected {
+                Line::from(label).black().on_light_cyan()
+            } else {
+                Line::from(label)
+            }
+        })
+        .collect::<Vec<_>>();
+
+    let block = Block::new()
+        .title(" Spawn ")
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::new().fg(Color::LightCyan))
+        .style(Style::new().bg(Color::Black));
+    let paragraph = Paragraph::new(lines)
+        .block(block)
+        .style(Style::new().fg(Color::White).bg(Color::Black));
+
+    frame.render_widget(Clear, modal_area);
+    frame.render_widget(paragraph, modal_area);
+}
+
+#[derive(Debug, Clone, Copy)]
+enum LayerPosition {
+    Surface,
+    Floor,
+}
+
+fn render_layer(frame: &mut Frame<'_>, area: Rect, world: &ReefWorld, position: LayerPosition) {
+    let (layer, start_y) = match position {
+        LayerPosition::Surface => (&world.surface, area.y),
+        LayerPosition::Floor => (
+            &world.floor,
+            area.bottom().saturating_sub(world.floor.height),
+        ),
+    };
+    let style = Style::new().fg(layer.color);
+    let buffer = frame.buffer_mut();
+
+    for row in 0..layer.height {
+        let y = start_y + row;
+        if y >= area.bottom() {
+            continue;
+        }
+
+        for x in 0..area.width {
+            if let Some(symbol) = layer.cell_at(world.viewport_x + x as i32, row)
+                && let Some(cell) = buffer.cell_mut((area.x + x, y))
+            {
+                let mut encoded = [0; 4];
+                cell.set_symbol(symbol.encode_utf8(&mut encoded))
+                    .set_style(style);
+            }
+        }
+    }
+}
+
+fn render_water(frame: &mut Frame<'_>, area: Rect, tick: u64) {
+    let buffer = frame.buffer_mut();
+    let water_style = Style::new().fg(Color::DarkGray);
+    for y in 0..area.height {
+        for x in 0..area.width {
+            let ripple = match (x as u64 + y as u64 * 3 + tick / 2) % 23 {
+                0 => "~",
+                7 => ".",
+                _ => " ",
+            };
+            if ripple != " "
+                && let Some(cell) = buffer.cell_mut((area.x + x, area.y + y))
+            {
+                cell.set_symbol(ripple).set_style(water_style);
+            }
+        }
+    }
+}
+
+fn render_creatures(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    definitions: &[CreatureDef],
+    entities: &[Entity],
+    tick: u64,
+    viewport_x: i32,
+) {
+    let buffer = frame.buffer_mut();
+
+    for entity in entities {
+        if !entity.is_active() {
+            continue;
+        }
+
+        let def = &definitions[entity.def];
+        let variant = def.best_variant_for(entity.dx, entity.pose_intent, tick, entity.phase);
+        let style = Style::new().fg(entity.color).add_modifier(if def.brownian {
+            Modifier::BOLD
+        } else {
+            Modifier::empty()
+        });
+
+        for (line_index, line) in variant.art.iter().enumerate() {
+            let y = area.y as i32 + entity.y + line_index as i32;
+            if y < area.y as i32 || y >= area.bottom() as i32 {
+                continue;
+            }
+
+            let raw_x = area.x as i32 + entity.x - viewport_x;
+            if raw_x >= area.right() as i32 {
+                continue;
+            }
+
+            let (x, text) = if raw_x < area.x as i32 {
+                let skip = (area.x as i32 - raw_x) as usize;
+                let clipped = line.chars().skip(skip).collect::<String>();
+                (area.x, clipped)
+            } else {
+                (raw_x as u16, line.clone())
+            };
+
+            if text.is_empty() || x >= area.right() {
+                continue;
+            }
+
+            let width = area.right().saturating_sub(x) as usize;
+            buffer.set_stringn(x, y as u16, text, width, style);
+        }
+    }
+}
+
+fn centered_rect(area: Rect, width: u16, height: u16) -> Rect {
+    Rect::new(
+        area.x + area.width.saturating_sub(width) / 2,
+        area.y + area.height.saturating_sub(height) / 2,
+        width.min(area.width),
+        height.min(area.height),
+    )
+}
