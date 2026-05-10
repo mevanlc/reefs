@@ -331,11 +331,10 @@ pub fn load_creatures(dir: &Path) -> Result<Vec<CreatureDef>> {
 pub fn load_creature(path: &Path) -> Result<CreatureDef> {
     let source =
         fs::read_to_string(path).wrap_err_with(|| format!("reading {}", path.display()))?;
-    let parse_source = normalize_creature_kdl(&source);
-    let doc = parse_source
+    let doc = source
         .parse::<KdlDocument>()
         .wrap_err_with(|| format!("parsing {}", path.display()))
-        .with_section(|| parse_source.clone().header("KDL source"))?;
+        .with_section(|| source.clone().header("KDL source"))?;
 
     let fallback_name = path
         .file_stem()
@@ -514,28 +513,6 @@ fn clamp_velocity(value: i128) -> i16 {
     value.clamp(-1, 1) as i16
 }
 
-fn normalize_creature_kdl(source: &str) -> String {
-    source
-        .lines()
-        .map(|line| {
-            let trimmed = line.trim_start();
-            let indent_len = line.len() - trimmed.len();
-            let indent = &line[..indent_len];
-            if let Some(value) = trimmed.strip_prefix("count=")
-                && !value.is_empty()
-                && value.chars().all(|ch| ch.is_ascii_digit())
-            {
-                format!("{indent}count {value}")
-            } else if trimmed.starts_with("colors ") {
-                format!("{indent}{}", trimmed.replace(',', ""))
-            } else {
-                line.to_string()
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -580,11 +557,10 @@ mod tests {
         assert_eq!(
             bertrand.colors,
             vec![
-                Color::Rgb(0xeb, 0xbe, 0x0f),
                 Color::Rgb(0x8b, 0xc7, 0x14),
-                Color::Rgb(0x80, 0x9b, 0x41),
                 Color::Rgb(0x41, 0x4f, 0xbf),
                 Color::Rgb(0x83, 0x67, 0xc3),
+                Color::Rgb(0xe3, 0x9a, 0x02),
             ]
         );
     }
@@ -602,7 +578,7 @@ mod tests {
             "zero-count",
             r####"
 name "zero-count"
-count=0
+count 0
 
 face ###"""
 <>
@@ -730,22 +706,6 @@ o o
         let creature = load_creature(&path).expect("school chance loads");
 
         assert_eq!(creature.school_rearrange_chance(), Some(0.75));
-    }
-
-    #[test]
-    fn normalizes_compact_count_param_for_kdl_parser() {
-        assert_eq!(
-            normalize_creature_kdl("name \"bee\"\n\ncount=2\n"),
-            "name \"bee\"\n\ncount 2"
-        );
-    }
-
-    #[test]
-    fn normalizes_comma_separated_colors_for_kdl_parser() {
-        assert_eq!(
-            normalize_creature_kdl("colors \"#fff\", \"#000\"\n"),
-            "colors \"#fff\" \"#000\""
-        );
     }
 
     fn assert_school_units_fit_bbox(variant: &Variant) {

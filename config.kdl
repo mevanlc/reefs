@@ -16,7 +16,7 @@ reef {
     creatures {
         edge-behavior exit-world
         respawn condition=after-exit-world delay-ms=1000
-        count-scale = 2.0
+        count-scale 2.0
     }
 }
 

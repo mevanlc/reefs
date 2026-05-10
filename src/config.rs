@@ -64,11 +64,10 @@ pub struct TankConfig {
 pub fn load_config(path: &Path) -> Result<AppConfig> {
     let source =
         fs::read_to_string(path).wrap_err_with(|| format!("reading {}", path.display()))?;
-    let parse_source = normalize_config_kdl(&source);
-    let doc = parse_source
+    let doc = source
         .parse::<KdlDocument>()
         .wrap_err_with(|| format!("parsing {}", path.display()))
-        .with_section(|| parse_source.clone().header("KDL source"))?;
+        .with_section(|| source.clone().header("KDL source"))?;
 
     parse_config(&doc)
 }
@@ -289,25 +288,6 @@ fn parse_color(name: &str) -> Result<Color> {
     }
 }
 
-fn normalize_config_kdl(source: &str) -> String {
-    source
-        .lines()
-        .map(|line| {
-            let indent_len = line.len() - line.trim_start().len();
-            let (indent, trimmed) = line.split_at(indent_len);
-            if let Some(value) = trimmed
-                .strip_prefix("count-scale")
-                .and_then(|rest| rest.trim_start().strip_prefix('='))
-            {
-                format!("{indent}count-scale {}", value.trim_start())
-            } else {
-                line.to_string()
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -324,13 +304,5 @@ mod tests {
         assert_eq!(config.reef.creatures.count_scale, 2.0);
         assert_eq!(config.tank.width, 120);
         assert_eq!(config.tank.height, 40);
-    }
-
-    #[test]
-    fn normalizes_count_scale_assignment() {
-        assert_eq!(
-            normalize_config_kdl("creatures {\n    count-scale = 2.0\n}"),
-            "creatures {\n    count-scale 2.0\n}"
-        );
     }
 }

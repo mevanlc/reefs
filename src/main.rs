@@ -50,3 +50,52 @@ fn main() -> Result<()> {
     ratatui::restore();
     result
 }
+
+#[cfg(test)]
+mod tests {
+    use std::{fs, path::PathBuf, process::Command};
+
+    use kdl::KdlDocument;
+
+    #[test]
+    fn all_repo_kdl_files_parse() {
+        let mut failures = Vec::new();
+
+        for path in repo_kdl_files() {
+            let source = match fs::read_to_string(&path) {
+                Ok(source) => source,
+                Err(error) => {
+                    failures.push(format!("{}: read failed: {error}", path.display()));
+                    continue;
+                }
+            };
+
+            if let Err(error) = source.parse::<KdlDocument>() {
+                failures.push(format!("{}: parse failed: {error}", path.display()));
+            }
+        }
+
+        assert!(
+            failures.is_empty(),
+            "KDL parse failures:\n{}",
+            failures.join("\n")
+        );
+    }
+
+    fn repo_kdl_files() -> Vec<PathBuf> {
+        let output = Command::new("rg")
+            .args(["--files", "-g", "*.kdl"])
+            .output()
+            .expect("rg is available for repo file discovery");
+        assert!(
+            output.status.success(),
+            "rg failed while listing KDL files: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .map(PathBuf::from)
+            .collect()
+    }
+}

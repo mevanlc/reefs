@@ -1,6 +1,6 @@
 name "boxfish"
 
-count=2
+count 2
 
 right ###"""
   __

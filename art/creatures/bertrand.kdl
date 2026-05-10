@@ -1,6 +1,6 @@
 name "bertrand"
 
-count=0
+count 0
 
 colors "#8BC714" "#414FBF" "#8367C3" "#E39A02"
 
