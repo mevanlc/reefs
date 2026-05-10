@@ -1,0 +1,12 @@
+name "squigs"
+
+unit-motion "brownian"
+
+hitbox "autorect"
+
+face ###"""
+   ~ ~
+    ~  ~
+ ~   ~  ~
+    ~ ~
+"""### unit="~"

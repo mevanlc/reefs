@@ -1,0 +1,22 @@
+name "wigglewort"
+
+h-velocity 0
+v-velocity 0
+
+face ###"""
+(
+ )  
+(   )
+ ) (
+(   )
+ ) (
+"""###
+
+face1 ###"""
+ )
+(  
+ )   )
+(   (
+ )  )
+ ( (
+"""###
