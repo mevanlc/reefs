@@ -9,7 +9,7 @@ use ratatui::{DefaultTerminal, Frame, layout::Rect, style::Color};
 
 use crate::{
     config::{AppConfig, Mode},
-    creature::{CreatureDef, Entity, PoseIntent, SpawnLocation, Variant, tallest_variant_height},
+    creature::{ActivityState, CreatureDef, Entity, PoseIntent, Variant, tallest_variant_height},
     render,
     world::{ReefWorld, WorldBounds, load_world_layer},
 };
@@ -445,16 +445,19 @@ fn tick_reef(
             entity.lateral_dx = replacement.lateral_dx;
             entity.depth_swim_ticks = replacement.depth_swim_ticks;
             entity.school_rearrangements = replacement.school_rearrangements;
+            entity.activity = replacement.activity;
+            entity.activity_ticks = replacement.activity_ticks;
             entity.respawn_at = None;
             continue;
         }
 
         let def = &definitions[entity.def];
         entity.maybe_rearrange_school(def, rng);
-        if def.spawn_location == SpawnLocation::Floor {
+        if def.is_floor_bound() {
             let variant = def.best_variant_for(0, PoseIntent::Lateral, tick, entity.phase);
             entity.dx = 0;
             entity.dy = 0;
+            entity.activity = ActivityState::Idle;
             entity.pose_intent = PoseIntent::Lateral;
             entity.y = band.floor_y_for(variant).unwrap_or(band.top);
             continue;
@@ -488,6 +491,14 @@ fn tick_reef(
 }
 
 fn update_reef_motion(def: &CreatureDef, entity: &mut Entity, rng: &mut ThreadRng) {
+    entity.advance_activity(def, rng);
+    if entity.activity == ActivityState::Idle {
+        entity.dx = 0;
+        entity.dy = 0;
+        entity.pose_intent = PoseIntent::Lateral;
+        return;
+    }
+
     if def.four_way_swimmer {
         update_four_way_swim(entity, rng);
     } else if def.brownian && rng.random_bool(0.25) {
@@ -563,7 +574,7 @@ fn rebind_creatures_to_reef(
 
         let def = &definitions[entity.def];
         let variant = def.best_variant_for(entity.dx, entity.pose_intent, tick, entity.phase);
-        if def.spawn_location == SpawnLocation::Floor {
+        if def.is_floor_bound() {
             if let Some(y) = band.floor_y_for(variant) {
                 entity.y = y;
             }
@@ -593,6 +604,7 @@ fn spawn_tank_entity(
 ) -> Entity {
     let def = &definitions[def_index];
     let (dx, dy) = def.starting_velocity(rng);
+    let (activity, activity_ticks) = def.initial_activity(rng);
     let variant = def.best_variant(dx, 0, def_index + copy_index);
     let max_x = tank
         .width
@@ -618,6 +630,8 @@ fn spawn_tank_entity(
         lateral_dx: dx,
         depth_swim_ticks: 0,
         school_rearrangements: 0,
+        activity,
+        activity_ticks,
     }
 }
 
@@ -632,7 +646,7 @@ fn spawn_reef_entity(
 ) -> Entity {
     let def = &definitions[def_index];
     let (mut dx, dy) = def.starting_velocity(rng);
-    if dx == 0 && def.spawn_location != SpawnLocation::Floor {
+    if dx == 0 && !def.is_floor_bound() {
         dx = if rng.random_bool(0.5) { -1 } else { 1 };
     }
 
@@ -654,14 +668,17 @@ fn spawn_reef_entity(
     };
 
     let band = WaterBand::for_reef(world, area.height);
-    let y = match def.spawn_location {
-        SpawnLocation::Water => band.random_y_for(variant, rng).unwrap_or(band.top),
-        SpawnLocation::Floor => band.floor_y_for(variant).unwrap_or(band.top),
+    let y = if def.is_floor_bound() {
+        band.floor_y_for(variant).unwrap_or(band.top)
+    } else {
+        band.random_y_for(variant, rng).unwrap_or(band.top)
     };
-    let (dx, dy) = match def.spawn_location {
-        SpawnLocation::Water => (dx, dy),
-        SpawnLocation::Floor => (0, 0),
+    let (dx, dy) = if def.is_floor_bound() {
+        (0, 0)
+    } else {
+        (dx, dy)
     };
+    let (activity, activity_ticks) = def.initial_activity(rng);
 
     Entity {
         def: def_index,
@@ -676,6 +693,8 @@ fn spawn_reef_entity(
         lateral_dx: dx,
         depth_swim_ticks: 0,
         school_rearrangements: 0,
+        activity,
+        activity_ticks,
     }
 }
 
@@ -774,6 +793,8 @@ mod tests {
             lateral_dx: -1,
             depth_swim_ticks: 0,
             school_rearrangements: 0,
+            activity: ActivityState::Active,
+            activity_ticks: 1,
         };
 
         assert!(!entity_exited(&entity, &variant, bounds));
@@ -801,6 +822,8 @@ mod tests {
             lateral_dx: -1,
             depth_swim_ticks: 2,
             school_rearrangements: 0,
+            activity: ActivityState::Active,
+            activity_ticks: 1,
         };
 
         update_four_way_swim(&mut entity, &mut rng);
