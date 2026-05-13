@@ -9,7 +9,9 @@ use ratatui::{DefaultTerminal, Frame, layout::Rect, style::Color};
 
 use crate::{
     config::{AppConfig, Mode},
-    creature::{ActivityState, CreatureDef, Entity, PoseIntent, Variant, tallest_variant_height},
+    creature::{
+        ActivityState, CreatureDef, Entity, PoseIntent, Territory, Variant, tallest_variant_height,
+    },
     render,
     world::{ReefWorld, WorldBounds, load_world_layer},
 };
@@ -83,6 +85,15 @@ impl WaterBand {
             None
         } else {
             Some(y.clamp(self.top, max_y))
+        }
+    }
+
+    pub fn y_bounds_for(&self, variant: &Variant) -> Option<(i32, i32)> {
+        let max_y = self.bottom - variant.height as i32;
+        if max_y < self.top {
+            None
+        } else {
+            Some((self.top, max_y))
         }
     }
 
@@ -447,6 +458,7 @@ fn tick_reef(
             entity.school_rearrangements = replacement.school_rearrangements;
             entity.activity = replacement.activity;
             entity.activity_ticks = replacement.activity_ticks;
+            entity.territory = replacement.territory;
             entity.respawn_at = None;
             continue;
         }
@@ -463,7 +475,9 @@ fn tick_reef(
             continue;
         }
 
-        update_reef_motion(def, entity, rng);
+        let motion_variant =
+            def.best_variant_for(entity.dx, entity.pose_intent, tick, entity.phase);
+        update_reef_motion(def, entity, &band, motion_variant, rng);
 
         entity.x += entity.dx as i32;
         entity.y += entity.dy as i32;
@@ -490,7 +504,13 @@ fn tick_reef(
     }
 }
 
-fn update_reef_motion(def: &CreatureDef, entity: &mut Entity, rng: &mut ThreadRng) {
+fn update_reef_motion(
+    def: &CreatureDef,
+    entity: &mut Entity,
+    band: &WaterBand,
+    variant: &Variant,
+    rng: &mut ThreadRng,
+) {
     entity.advance_activity(def, rng);
     if entity.activity == ActivityState::Idle {
         entity.dx = 0;
@@ -508,6 +528,81 @@ fn update_reef_motion(def: &CreatureDef, entity: &mut Entity, rng: &mut ThreadRn
         && rng.random_bool(crate::creature::default_movement_transition_chance())
     {
         entity.toggle_vertical_motion(rng);
+    }
+
+    apply_depth_bias(def, entity, band, variant, rng);
+    apply_territory_bias(def, entity, rng);
+}
+
+fn apply_depth_bias(
+    def: &CreatureDef,
+    entity: &mut Entity,
+    band: &WaterBand,
+    variant: &Variant,
+    rng: &mut ThreadRng,
+) {
+    if def.four_way_swimmer || def.is_floor_bound() {
+        return;
+    }
+    let Some((min_y, max_y)) = band.y_bounds_for(variant) else {
+        return;
+    };
+    if min_y >= max_y {
+        return;
+    }
+
+    let preferences = &def.preferences;
+    let mut target = preferences.depth;
+    target += preferences.demersal * (1.0 - target) * 0.4;
+    target -= preferences.reefer * target * 0.25;
+    target = target.clamp(0.0, 1.0);
+
+    let target_y = min_y + ((max_y - min_y) as f64 * target).round() as i32;
+    let distance = target_y - entity.y;
+    if distance.abs() <= 1 {
+        if rng.random_bool((preferences.sedentary * 0.15).clamp(0.0, 0.5)) {
+            entity.dy = 0;
+        }
+        return;
+    }
+
+    let preference_strength = (preferences
+        .demersal
+        .max(preferences.reefer)
+        .max((preferences.depth - 0.5).abs() * 2.0)
+        * 0.35
+        + 0.08)
+        .clamp(0.0, 0.6);
+    if rng.random_bool(preference_strength) {
+        entity.dy = distance.signum() as i16;
+    }
+}
+
+fn apply_territory_bias(def: &CreatureDef, entity: &mut Entity, rng: &mut ThreadRng) {
+    let Some(territory) = entity.territory else {
+        return;
+    };
+    let territorial = def.preferences.territorial;
+    if territorial <= 0.0 {
+        return;
+    }
+
+    if entity.x < territory.min_x {
+        entity.dx = 1;
+    } else if entity.x > territory.max_x {
+        entity.dx = -1;
+    } else if rng.random_bool((territorial * 0.12).clamp(0.0, 0.75)) {
+        if entity.dx > 0 && entity.x >= territory.max_x {
+            entity.dx = -1;
+        } else if entity.dx < 0 && entity.x <= territory.min_x {
+            entity.dx = 1;
+        }
+    }
+
+    if entity.y < territory.min_y {
+        entity.dy = 1;
+    } else if entity.y > territory.max_y {
+        entity.dy = -1;
     }
 }
 
@@ -616,11 +711,25 @@ fn spawn_tank_entity(
         .saturating_sub(2)
         .saturating_sub(variant.height)
         .max(1) as i32;
+    let x = rng.random_range(0..=max_x);
+    let y = rng.random_range(0..=max_y);
+    let territory = assign_territory(
+        def,
+        x,
+        y,
+        TerritoryBounds {
+            min_x: 0,
+            max_x,
+            min_y: 0,
+            max_y,
+        },
+        rng,
+    );
 
     Entity {
         def: def_index,
-        x: rng.random_range(0..=max_x),
-        y: rng.random_range(0..=max_y),
+        x,
+        y,
         dx,
         dy,
         phase: rng.random_range(0..8),
@@ -632,6 +741,7 @@ fn spawn_tank_entity(
         school_rearrangements: 0,
         activity,
         activity_ticks,
+        territory,
     }
 }
 
@@ -679,6 +789,19 @@ fn spawn_reef_entity(
         (dx, dy)
     };
     let (activity, activity_ticks) = def.initial_activity(rng);
+    let (min_y, max_y) = band.y_bounds_for(variant).unwrap_or((band.top, band.top));
+    let territory = assign_territory(
+        def,
+        x,
+        y,
+        TerritoryBounds {
+            min_x: bounds.start,
+            max_x,
+            min_y,
+            max_y,
+        },
+        rng,
+    );
 
     Entity {
         def: def_index,
@@ -695,7 +818,47 @@ fn spawn_reef_entity(
         school_rearrangements: 0,
         activity,
         activity_ticks,
+        territory,
     }
+}
+
+fn assign_territory(
+    def: &CreatureDef,
+    x: i32,
+    y: i32,
+    bounds: TerritoryBounds,
+    rng: &mut ThreadRng,
+) -> Option<Territory> {
+    let geometry = def.preferences.territory_geometry.as_ref()?;
+    let (width, height) = geometry.sample_size(rng);
+    Some(Territory {
+        min_x: anchored_min(x, width.max(1) as i32, bounds.min_x, bounds.max_x),
+        max_x: anchored_max(x, width.max(1) as i32, bounds.min_x, bounds.max_x),
+        min_y: anchored_min(y, height.max(1) as i32, bounds.min_y, bounds.max_y),
+        max_y: anchored_max(y, height.max(1) as i32, bounds.min_y, bounds.max_y),
+    })
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TerritoryBounds {
+    min_x: i32,
+    max_x: i32,
+    min_y: i32,
+    max_y: i32,
+}
+
+fn anchored_min(center: i32, size: i32, min: i32, max: i32) -> i32 {
+    if min >= max {
+        return min;
+    }
+    let size = size.min(max - min + 1).max(1);
+    let start = center - size / 2;
+    start.clamp(min, max - size + 1)
+}
+
+fn anchored_max(center: i32, size: i32, min: i32, max: i32) -> i32 {
+    let start = anchored_min(center, size, min, max);
+    start + size.min(max.saturating_sub(min) + 1).max(1) - 1
 }
 
 fn entity_color(
@@ -795,6 +958,7 @@ mod tests {
             school_rearrangements: 0,
             activity: ActivityState::Active,
             activity_ticks: 1,
+            territory: None,
         };
 
         assert!(!entity_exited(&entity, &variant, bounds));
@@ -824,6 +988,7 @@ mod tests {
             school_rearrangements: 0,
             activity: ActivityState::Active,
             activity_ticks: 1,
+            territory: None,
         };
 
         update_four_way_swim(&mut entity, &mut rng);

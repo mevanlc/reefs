@@ -327,6 +327,16 @@ pub enum TerritoryGeometry {
     Rectangle(RectangleTerritoryGeometry),
 }
 
+impl TerritoryGeometry {
+    pub fn sample_size(&self, rng: &mut ThreadRng) -> (u16, u16) {
+        match self {
+            Self::Rectangle(rectangle) => {
+                (rectangle.width.sample(rng), rectangle.height.sample(rng))
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RectangleTerritoryGeometry {
     pub width: DimensionSpec,
@@ -337,6 +347,15 @@ pub struct RectangleTerritoryGeometry {
 pub enum DimensionSpec {
     Constant(u16),
     Uniform { min: u16, max: u16 },
+}
+
+impl DimensionSpec {
+    fn sample(&self, rng: &mut ThreadRng) -> u16 {
+        match *self {
+            Self::Constant(value) => value,
+            Self::Uniform { min, max } => rng.random_range(min..=max),
+        }
+    }
 }
 
 impl Variant {
@@ -407,6 +426,15 @@ pub struct Entity {
     pub school_rearrangements: u64,
     pub activity: ActivityState,
     pub activity_ticks: u16,
+    pub territory: Option<Territory>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Territory {
+    pub min_x: i32,
+    pub max_x: i32,
+    pub min_y: i32,
+    pub max_y: i32,
 }
 
 impl Entity {
