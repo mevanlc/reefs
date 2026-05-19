@@ -239,7 +239,7 @@ impl App {
                     entity.maybe_rearrange_school(def, &mut rng);
                     let variant = def.best_variant(
                         entity.pose_dx_for(def),
-                        entity.animation_tick(self.tick),
+                        entity.animation_tick_for(def, self.tick),
                         entity.phase,
                     );
                     entity.tick_bounded(def, bounds, variant, self.tick, &mut rng);
@@ -534,7 +534,7 @@ fn tick_reef(
         let motion_variant = def.best_variant_for(
             entity.pose_dx_for(def),
             entity.pose_intent,
-            entity.animation_tick(tick),
+            entity.animation_tick_for(def, tick),
             entity.phase,
         );
         update_reef_motion(def, entity, &band, motion_variant, tick, rng);
@@ -545,7 +545,7 @@ fn tick_reef(
         let variant = def.best_variant_for(
             entity.pose_dx_for(def),
             entity.pose_intent,
-            entity.animation_tick(tick),
+            entity.animation_tick_for(def, tick),
             entity.phase,
         );
         if let Some(clamped_y) = band.clamp_y_for(entity.y, variant)
@@ -739,7 +739,7 @@ fn rebind_creatures_to_reef(
         let variant = def.best_variant_for(
             entity.pose_dx_for(def),
             entity.pose_intent,
-            entity.animation_tick(tick),
+            entity.animation_tick_for(def, tick),
             entity.phase,
         );
         if def.is_floor_bound() {

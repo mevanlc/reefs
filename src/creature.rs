@@ -560,6 +560,14 @@ impl Entity {
         }
     }
 
+    pub fn animation_tick_for(&self, def: &CreatureDef, tick: u64) -> u64 {
+        if self.activity == ActivityState::Idle && def.is_sessile() {
+            tick
+        } else {
+            self.animation_tick(tick)
+        }
+    }
+
     pub fn update_idle_motion(&mut self, tick: u64, rng: &mut ThreadRng) {
         self.dy = 0;
         self.pose_intent = PoseIntent::Lateral;
@@ -1529,6 +1537,22 @@ face ###"""
         entity.update_idle_motion(IDLE_ACTION_INTERVAL + 1, &mut rng);
         assert_eq!(entity.dx, 0);
         assert_eq!(entity.pose_dx(), -1);
+    }
+
+    #[test]
+    fn sessile_idle_pose_keeps_animation_tick() {
+        let wigglewort =
+            load_creature(Path::new("art/creatures/wigglewort.kdl")).expect("wigglewort loads");
+        let entity = test_entity(ActivityState::Idle, 0);
+
+        assert!(wigglewort.is_sessile());
+        assert_eq!(entity.animation_tick_for(&wigglewort, 99), 99);
+        assert_eq!(
+            wigglewort
+                .best_variant_for(0, PoseIntent::Lateral, 3, entity.phase)
+                .pose,
+            "face1"
+        );
     }
 
     #[test]

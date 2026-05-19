@@ -449,7 +449,7 @@ fn render_creatures(
         let variant = def.best_variant_for(
             entity.pose_dx_for(def),
             entity.pose_intent,
-            entity.animation_tick(tick),
+            entity.animation_tick_for(def, tick),
             entity.phase,
         );
         let style = Style::new().fg(entity.color).add_modifier(if def.brownian {
