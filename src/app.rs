@@ -238,7 +238,7 @@ impl App {
                     let def = &self.definitions[entity.def];
                     entity.maybe_rearrange_school(def, &mut rng);
                     let variant = def.best_variant(
-                        entity.pose_dx(),
+                        entity.pose_dx_for(def),
                         entity.animation_tick(self.tick),
                         entity.phase,
                     );
@@ -532,7 +532,7 @@ fn tick_reef(
         }
 
         let motion_variant = def.best_variant_for(
-            entity.pose_dx(),
+            entity.pose_dx_for(def),
             entity.pose_intent,
             entity.animation_tick(tick),
             entity.phase,
@@ -543,7 +543,7 @@ fn tick_reef(
         entity.y += entity.dy as i32;
 
         let variant = def.best_variant_for(
-            entity.pose_dx(),
+            entity.pose_dx_for(def),
             entity.pose_intent,
             entity.animation_tick(tick),
             entity.phase,
@@ -737,7 +737,7 @@ fn rebind_creatures_to_reef(
 
         let def = &definitions[entity.def];
         let variant = def.best_variant_for(
-            entity.pose_dx(),
+            entity.pose_dx_for(def),
             entity.pose_intent,
             entity.animation_tick(tick),
             entity.phase,

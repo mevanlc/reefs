@@ -48,39 +48,58 @@ impl CreatureDef {
         tick: u64,
         phase: usize,
     ) -> &Variant {
-        let wanted = match pose_intent {
-            PoseIntent::Face => "face",
-            PoseIntent::FaceAway => "face-away",
-            PoseIntent::Lateral => {
-                if dx < 0 {
-                    "left"
-                } else if dx > 0 {
-                    "right"
-                } else {
-                    "face"
-                }
-            }
-        };
-
-        let matching = self
-            .variants
-            .iter()
-            .filter(|variant| pose_matches(&variant.pose, wanted))
-            .collect::<Vec<_>>();
-
-        if matching.is_empty() {
-            let face = self
+        for wanted in self.pose_preferences(dx, pose_intent) {
+            let matching = self
                 .variants
                 .iter()
-                .filter(|variant| variant.pose.starts_with("face"))
+                .filter(|variant| pose_matches(&variant.pose, wanted))
                 .collect::<Vec<_>>();
-            if !face.is_empty() {
-                return face[(tick as usize / 3 + phase) % face.len()];
+            if !matching.is_empty() {
+                return matching[(tick as usize / 3 + phase) % matching.len()];
             }
-            return &self.variants[(tick as usize / 3 + phase) % self.variants.len()];
         }
 
-        matching[(tick as usize / 3 + phase) % matching.len()]
+        let face = self
+            .variants
+            .iter()
+            .filter(|variant| variant.pose.starts_with("face"))
+            .collect::<Vec<_>>();
+        if !face.is_empty() {
+            return face[(tick as usize / 3 + phase) % face.len()];
+        }
+        &self.variants[(tick as usize / 3 + phase) % self.variants.len()]
+    }
+
+    fn pose_preferences(&self, dx: i16, pose_intent: PoseIntent) -> &'static [&'static str] {
+        match pose_intent {
+            PoseIntent::Face => &["face"],
+            PoseIntent::FaceAway => &["face-away"],
+            PoseIntent::Lateral => {
+                if dx < 0 {
+                    if self.has_pose("left-drag") {
+                        &["left-drag", "left"]
+                    } else {
+                        &["left"]
+                    }
+                } else if dx > 0 {
+                    if self.has_pose("right-drag") {
+                        &["right-drag", "right"]
+                    } else {
+                        &["right"]
+                    }
+                } else {
+                    &["face"]
+                }
+            }
+        }
+    }
+
+    pub fn has_motion_drag_poses(&self) -> bool {
+        self.has_pose("left-drag") || self.has_pose("right-drag")
+    }
+
+    fn has_pose(&self, pose: &str) -> bool {
+        has_pose(&self.variants, pose)
     }
 
     pub fn starting_velocity(&self, rng: &mut ThreadRng) -> (i16, i16) {
@@ -520,6 +539,16 @@ impl Entity {
             self.facing_dx()
         } else {
             0
+        }
+    }
+
+    pub fn pose_dx_for(&self, def: &CreatureDef) -> i16 {
+        if self.dx != 0 {
+            self.dx
+        } else if self.activity == ActivityState::Idle && def.has_motion_drag_poses() {
+            0
+        } else {
+            self.pose_dx()
         }
     }
 
@@ -1500,6 +1529,37 @@ face ###"""
         entity.update_idle_motion(IDLE_ACTION_INTERVAL + 1, &mut rng);
         assert_eq!(entity.dx, 0);
         assert_eq!(entity.pose_dx(), -1);
+    }
+
+    #[test]
+    fn drag_poses_are_used_only_for_horizontal_motion() {
+        let squeeb = load_creature(Path::new("art/creatures/squeeb.kdl")).expect("squeeb loads");
+        let mut entity = test_entity(ActivityState::Idle, -1);
+
+        assert!(squeeb.has_motion_drag_poses());
+        assert_eq!(entity.pose_dx_for(&squeeb), 0);
+        assert_eq!(
+            squeeb
+                .best_variant_for(entity.pose_dx_for(&squeeb), PoseIntent::Lateral, 0, 0)
+                .pose,
+            "face"
+        );
+
+        entity.dx = -1;
+        assert_eq!(
+            squeeb
+                .best_variant_for(entity.pose_dx_for(&squeeb), PoseIntent::Lateral, 0, 0)
+                .pose,
+            "left-drag"
+        );
+
+        entity.dx = 1;
+        assert_eq!(
+            squeeb
+                .best_variant_for(entity.pose_dx_for(&squeeb), PoseIntent::Lateral, 0, 0)
+                .pose,
+            "right-drag"
+        );
     }
 
     #[test]

@@ -447,7 +447,7 @@ fn render_creatures(
 
         let def = &definitions[entity.def];
         let variant = def.best_variant_for(
-            entity.pose_dx(),
+            entity.pose_dx_for(def),
             entity.pose_intent,
             entity.animation_tick(tick),
             entity.phase,
