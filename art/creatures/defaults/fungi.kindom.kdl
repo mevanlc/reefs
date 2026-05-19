@@ -1,4 +1,5 @@
 kindom fungi
+sauce author=mevanlc date=20260507 license=CCBYSA4.0
 
 constraints {
     sessile attach=bottom to=floor

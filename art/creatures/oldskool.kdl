@@ -1,4 +1,7 @@
 name "oldskool"
+title "a school of anglefish"
+description "they still remember the days of ascii"
+sauce author=anonymous license=unlicense
 
 motion "brownian"
 unit-motion "brownian" rearrange-chance=0.1

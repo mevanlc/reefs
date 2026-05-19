@@ -1,4 +1,7 @@
 name "examplefish"
+title "an examplary fish"
+description "art based on boxfish"
+sauce author=mevanlc date=20260506 license=CCBYSA4.0
 
 count -1
 
