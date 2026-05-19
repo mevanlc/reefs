@@ -3,12 +3,11 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use color_eyre::{
-    Section, SectionExt,
-    eyre::{Result, WrapErr, eyre},
-};
+use color_eyre::eyre::{Result, WrapErr, eyre};
 use kdl::{KdlDocument, KdlNode, KdlValue};
 use ratatui::style::Color;
+
+use crate::kdl_parse;
 
 #[derive(Debug, Clone)]
 pub struct AppConfig {
@@ -64,10 +63,7 @@ pub struct TankConfig {
 pub fn load_config(path: &Path) -> Result<AppConfig> {
     let source =
         fs::read_to_string(path).wrap_err_with(|| format!("reading {}", path.display()))?;
-    let doc = source
-        .parse::<KdlDocument>()
-        .wrap_err_with(|| format!("parsing {}", path.display()))
-        .with_section(|| source.clone().header("KDL source"))?;
+    let doc = kdl_parse::parse_document(path, &source)?;
 
     parse_config(&doc)
 }

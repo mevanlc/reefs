@@ -16,7 +16,7 @@ use crate::{
     world::{ReefWorld, WorldBounds, load_world_layer},
 };
 
-const DEFAULT_TICK_RATE: Duration = Duration::from_millis(140);
+const DEFAULT_TICK_RATE: Duration = Duration::from_millis(220);
 const MIN_TICK_RATE: Duration = Duration::from_millis(10);
 const MAX_TICK_RATE: Duration = Duration::from_millis(3000);
 const TICK_RATE_STEP: Duration = Duration::from_millis(20);
@@ -30,12 +30,14 @@ pub struct App {
     pub(crate) show_creature_names: bool,
     pub(crate) mode: RuntimeMode,
     pub(crate) spawn_modal: Option<SpawnModal>,
+    pub(crate) show_help: bool,
     tick_rate: Duration,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct SpawnModal {
     pub selected: usize,
+    pub order: Vec<usize>,
 }
 
 pub enum RuntimeMode {
@@ -151,6 +153,7 @@ impl App {
             show_creature_names: false,
             mode,
             spawn_modal: None,
+            show_help: false,
             tick_rate: DEFAULT_TICK_RATE,
         };
         app.spawn_initial_entities(launch_area, initial_count_scale);
@@ -272,13 +275,22 @@ impl App {
     }
 
     fn handle_key(&mut self, key: KeyEvent) -> bool {
+        if self.show_help {
+            return self.handle_help_modal_key(key);
+        }
+
         if self.spawn_modal.is_some() {
             self.handle_spawn_modal_key(key);
             return false;
         }
 
+        self.handle_runtime_key(key)
+    }
+
+    fn handle_runtime_key(&mut self, key: KeyEvent) -> bool {
         match key.code {
             KeyCode::Char('q') | KeyCode::Esc => return true,
+            KeyCode::Char('?') => self.show_help = true,
             KeyCode::Char('b') => self.show_background = !self.show_background,
             KeyCode::Char('t') => self.show_creature_names = !self.show_creature_names,
             KeyCode::Char('+') => self.spawn_random_creature(),
@@ -298,6 +310,30 @@ impl App {
         false
     }
 
+    fn handle_help_modal_key(&mut self, key: KeyEvent) -> bool {
+        match key.code {
+            KeyCode::Char('q') => return true,
+            KeyCode::Esc | KeyCode::Char('?') => self.show_help = false,
+            KeyCode::Char('b')
+            | KeyCode::Char('t')
+            | KeyCode::Char('+')
+            | KeyCode::Char('-')
+            | KeyCode::Left
+            | KeyCode::Right
+            | KeyCode::Up
+            | KeyCode::Down => {
+                self.handle_runtime_key(key);
+            }
+            KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.show_help = false;
+                self.open_spawn_modal();
+            }
+            _ => {}
+        }
+
+        false
+    }
+
     fn handle_spawn_modal_key(&mut self, key: KeyEvent) {
         match key.code {
             KeyCode::Esc => self.spawn_modal = None,
@@ -307,8 +343,13 @@ impl App {
             KeyCode::Up => self.move_spawn_selection(-1),
             KeyCode::Down => self.move_spawn_selection(1),
             KeyCode::Enter => {
-                if let Some(modal) = self.spawn_modal {
-                    self.spawn_creature(modal.selected);
+                if let Some(def_index) = self
+                    .spawn_modal
+                    .as_ref()
+                    .and_then(|modal| modal.order.get(modal.selected))
+                    .copied()
+                {
+                    self.spawn_creature(def_index);
                 }
             }
             _ => {}
@@ -320,14 +361,16 @@ impl App {
             return;
         }
 
-        self.spawn_modal = Some(SpawnModal { selected: 0 });
+        let mut order = (0..self.definitions.len()).collect::<Vec<_>>();
+        order.sort_by_key(|def_index| self.spawned_count(*def_index));
+        self.spawn_modal = Some(SpawnModal { selected: 0, order });
     }
 
     fn move_spawn_selection(&mut self, delta: isize) {
         let Some(modal) = &mut self.spawn_modal else {
             return;
         };
-        let count = self.definitions.len();
+        let count = modal.order.len();
         if count == 0 {
             modal.selected = 0;
             return;
@@ -337,6 +380,13 @@ impl App {
             .selected
             .saturating_add_signed(delta)
             .min(count.saturating_sub(1));
+    }
+
+    fn spawned_count(&self, def_index: usize) -> usize {
+        self.entities
+            .iter()
+            .filter(|entity| entity.def == def_index)
+            .count()
     }
 
     fn spawn_random_creature(&mut self) {
@@ -1151,21 +1201,162 @@ mod tests {
         let mut app = App::new(config, definitions, Rect::new(0, 0, 120, 40)).expect("app starts");
 
         app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
-        assert_eq!(app.spawn_modal.map(|modal| modal.selected), Some(0));
+        assert_eq!(
+            app.spawn_modal.as_ref().map(|modal| modal.selected),
+            Some(0)
+        );
 
         app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE));
-        assert_eq!(app.spawn_modal.map(|modal| modal.selected), Some(1));
+        assert_eq!(
+            app.spawn_modal.as_ref().map(|modal| modal.selected),
+            Some(1)
+        );
 
+        let selected_def = app
+            .spawn_modal
+            .as_ref()
+            .and_then(|modal| modal.order.get(modal.selected))
+            .copied()
+            .expect("selected creature");
         let before_total = app.entities.len();
-        let before_selected = app.entities.iter().filter(|entity| entity.def == 1).count();
+        let before_selected = app.spawned_count(selected_def);
         app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
 
-        assert_eq!(app.spawn_modal.map(|modal| modal.selected), Some(1));
-        assert_eq!(app.entities.len(), before_total + 1);
         assert_eq!(
-            app.entities.iter().filter(|entity| entity.def == 1).count(),
-            before_selected + 1
+            app.spawn_modal.as_ref().map(|modal| modal.selected),
+            Some(1)
         );
+        assert_eq!(app.entities.len(), before_total + 1);
+        assert_eq!(app.spawned_count(selected_def), before_selected + 1);
+    }
+
+    #[test]
+    fn spawn_modal_order_is_sorted_by_spawned_count_when_opened() {
+        let config = load_config("config.kdl".as_ref()).expect("config loads");
+        let definitions = load_creatures("art/creatures".as_ref()).expect("creatures load");
+        let mut app = App::new(config, definitions, Rect::new(0, 0, 120, 40)).expect("app starts");
+
+        app.open_spawn_modal();
+
+        let order = app
+            .spawn_modal
+            .as_ref()
+            .map(|modal| modal.order.clone())
+            .expect("spawn modal opens");
+        let counts = order
+            .iter()
+            .map(|def_index| app.spawned_count(*def_index))
+            .collect::<Vec<_>>();
+        assert!(counts.windows(2).all(|window| window[0] <= window[1]));
+    }
+
+    #[test]
+    fn spawn_modal_order_does_not_resort_after_spawning() {
+        let config = load_config("config.kdl".as_ref()).expect("config loads");
+        let definitions = load_creatures("art/creatures".as_ref()).expect("creatures load");
+        let mut app = App::new(config, definitions, Rect::new(0, 0, 120, 40)).expect("app starts");
+
+        app.open_spawn_modal();
+        let order_before = app
+            .spawn_modal
+            .as_ref()
+            .map(|modal| modal.order.clone())
+            .expect("spawn modal opens");
+
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert_eq!(
+            app.spawn_modal.as_ref().map(|modal| &modal.order),
+            Some(&order_before)
+        );
+    }
+
+    #[test]
+    fn question_mark_opens_and_closes_help_modal() {
+        let config = load_config("config.kdl".as_ref()).expect("config loads");
+        let definitions = load_creatures("art/creatures".as_ref()).expect("creatures load");
+        let mut app = App::new(config, definitions, Rect::new(0, 0, 120, 40)).expect("app starts");
+
+        assert!(!app.show_help);
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE));
+        assert!(app.show_help);
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE));
+        assert!(!app.show_help);
+    }
+
+    #[test]
+    fn esc_closes_help_modal() {
+        let config = load_config("config.kdl".as_ref()).expect("config loads");
+        let definitions = load_creatures("art/creatures".as_ref()).expect("creatures load");
+        let mut app = App::new(config, definitions, Rect::new(0, 0, 120, 40)).expect("app starts");
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE));
+
+        assert!(!app.handle_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
+        assert!(!app.show_help);
+    }
+
+    #[test]
+    fn q_still_quits_from_help_modal() {
+        let config = load_config("config.kdl".as_ref()).expect("config loads");
+        let definitions = load_creatures("art/creatures".as_ref()).expect("creatures load");
+        let mut app = App::new(config, definitions, Rect::new(0, 0, 120, 40)).expect("app starts");
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE));
+
+        assert!(app.handle_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE)));
+    }
+
+    #[test]
+    fn help_modal_passes_through_runtime_shortcuts() {
+        let config = load_config("config.kdl".as_ref()).expect("config loads");
+        let definitions = load_creatures("art/creatures".as_ref()).expect("creatures load");
+        let mut app = App::new(config, definitions, Rect::new(0, 0, 120, 40)).expect("app starts");
+        let initial_entities = app.entities.len();
+        let initial_viewport_x = reef_viewport_x(&app);
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE));
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE));
+        assert!(app.show_background);
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE));
+        assert!(app.show_creature_names);
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('+'), KeyModifiers::NONE));
+        assert_eq!(app.entities.len(), initial_entities + 1);
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('-'), KeyModifiers::NONE));
+        assert_eq!(app.entities.len(), initial_entities);
+
+        app.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        assert_eq!(reef_viewport_x(&app), initial_viewport_x + SCROLL_STEP);
+
+        app.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+        assert_eq!(reef_viewport_x(&app), initial_viewport_x);
+
+        app.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::SHIFT));
+        assert_eq!(app.tick_rate, DEFAULT_TICK_RATE - TICK_RATE_STEP);
+
+        app.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::SHIFT));
+        assert_eq!(app.tick_rate, DEFAULT_TICK_RATE);
+
+        assert!(app.show_help);
+    }
+
+    #[test]
+    fn ctrl_s_opens_spawn_modal_from_help_modal() {
+        let config = load_config("config.kdl".as_ref()).expect("config loads");
+        let definitions = load_creatures("art/creatures".as_ref()).expect("creatures load");
+        let mut app = App::new(config, definitions, Rect::new(0, 0, 120, 40)).expect("app starts");
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE));
+        app.handle_key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
+
+        assert!(!app.show_help);
+        assert!(app.spawn_modal.is_some());
     }
 
     #[test]
@@ -1213,5 +1404,12 @@ mod tests {
             .iter()
             .position(|definition| definition.count == 0)
             .expect("at least one count=0 creature definition exists")
+    }
+
+    fn reef_viewport_x(app: &App) -> i32 {
+        match &app.mode {
+            RuntimeMode::Reef(reef) => reef.world.viewport_x,
+            RuntimeMode::Tank(_) => unreachable!("test config uses reef mode"),
+        }
     }
 }

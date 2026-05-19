@@ -1,13 +1,10 @@
 use std::fs;
 
-use color_eyre::{
-    Section, SectionExt,
-    eyre::{Result, WrapErr, eyre},
-};
-use kdl::{KdlDocument, KdlNode};
+use color_eyre::eyre::{Result, WrapErr, eyre};
+use kdl::KdlNode;
 use ratatui::style::Color;
 
-use crate::config::LayerConfig;
+use crate::{config::LayerConfig, kdl_parse};
 
 #[derive(Debug, Clone)]
 pub struct ReefWorld {
@@ -98,10 +95,7 @@ struct LayerChunk {
 pub fn load_world_layer(config: &LayerConfig) -> Result<WorldLayer> {
     let source = fs::read_to_string(&config.file)
         .wrap_err_with(|| format!("reading {}", config.file.display()))?;
-    let doc = source
-        .parse::<KdlDocument>()
-        .wrap_err_with(|| format!("parsing {}", config.file.display()))
-        .with_section(|| source.clone().header("KDL source"))?;
+    let doc = kdl_parse::parse_document(&config.file, &source)?;
 
     let chunks_node = doc
         .get("chunks")

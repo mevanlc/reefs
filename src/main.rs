@@ -1,6 +1,7 @@
 mod app;
 mod config;
 mod creature;
+mod kdl_parse;
 mod render;
 mod world;
 
@@ -57,6 +58,8 @@ mod tests {
 
     use kdl::KdlDocument;
 
+    use crate::kdl_parse::format_parse_error;
+
     #[test]
     fn all_repo_kdl_files_parse() {
         let mut failures = Vec::new();
@@ -71,7 +74,7 @@ mod tests {
             };
 
             if let Err(error) = source.parse::<KdlDocument>() {
-                failures.push(format!("{}: parse failed: {error}", path.display()));
+                failures.push(format_parse_error(&path, &source, &error));
             }
         }
 

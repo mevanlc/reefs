@@ -6,13 +6,12 @@ use std::{
     time::{Duration, Instant},
 };
 
-use color_eyre::{
-    Section, SectionExt,
-    eyre::{Result, WrapErr, eyre},
-};
+use color_eyre::eyre::{Result, WrapErr, eyre};
 use kdl::{KdlDocument, KdlNode, KdlValue};
 use rand::{RngExt, rngs::ThreadRng};
 use ratatui::{layout::Rect, style::Color};
+
+use crate::kdl_parse;
 
 #[derive(Debug, Clone)]
 pub struct CreatureDef {
@@ -828,10 +827,7 @@ fn is_kindom_default_file(path: &Path) -> bool {
 fn load_kdl_document(path: &Path) -> Result<KdlDocument> {
     let source =
         fs::read_to_string(path).wrap_err_with(|| format!("reading {}", path.display()))?;
-    source
-        .parse::<KdlDocument>()
-        .wrap_err_with(|| format!("parsing {}", path.display()))
-        .with_section(|| source.header("KDL source"))
+    kdl_parse::parse_document(path, &source)
 }
 
 fn default_file_kindom(path: &Path) -> Result<Kindom> {

@@ -3,7 +3,7 @@ use ratatui::{
     buffer::Buffer,
     layout::Rect,
     style::{Color, Modifier, Style, Stylize},
-    text::Line,
+    text::{Line, Span},
     widgets::{Block, BorderType, Borders, Clear, Paragraph},
 };
 
@@ -12,6 +12,9 @@ use crate::{
     creature::{CreatureDef, Entity, School, Variant},
     world::ReefWorld,
 };
+
+const MODAL_BORDER: Color = Color::LightCyan;
+const KEY_HIGHLIGHT: Color = Color::Green;
 
 pub fn render(frame: &mut Frame<'_>, app: &App) {
     let area = frame.area();
@@ -28,6 +31,10 @@ pub fn render(frame: &mut Frame<'_>, app: &App) {
 
     if app.spawn_modal.is_some() {
         render_spawn_modal(frame, area, app);
+    }
+
+    if app.show_help {
+        render_help_modal(frame, area);
     }
 }
 
@@ -93,6 +100,7 @@ fn render_reef(frame: &mut Frame<'_>, area: Rect, app: &App, world: &ReefWorld) 
     }
 
     render_layer(frame, area, world, LayerPosition::Surface);
+    render_surface_overlay(frame, area);
     render_layer(frame, area, world, LayerPosition::Floor);
     render_creatures(
         frame,
@@ -103,6 +111,29 @@ fn render_reef(frame: &mut Frame<'_>, area: Rect, app: &App, world: &ReefWorld) 
         world.viewport_x,
         app.show_creature_names,
     );
+}
+
+fn render_surface_overlay(frame: &mut Frame<'_>, area: Rect) {
+    if area.height == 0 || area.width == 0 {
+        return;
+    }
+
+    let buffer = frame.buffer_mut();
+    let label_style = Style::new().fg(Color::LightCyan);
+    render_surface_text(buffer, area, 2, " reefs ", label_style);
+    render_surface_text(buffer, area, 11, " ", label_style);
+    render_surface_text(buffer, area, 12, "?", key_style());
+    render_surface_text(buffer, area, 13, " help ", label_style);
+}
+
+fn render_surface_text(buffer: &mut Buffer, area: Rect, offset: u16, text: &str, style: Style) {
+    if offset >= area.width {
+        return;
+    }
+
+    let x = area.x + offset;
+    let width = area.right().saturating_sub(x) as usize;
+    buffer.set_stringn(x, area.y, text, width, style);
 }
 
 fn render_size_warning(frame: &mut Frame<'_>, area: Rect, min_height: u16) {
@@ -117,53 +148,77 @@ fn render_size_warning(frame: &mut Frame<'_>, area: Rect, min_height: u16) {
 }
 
 fn render_spawn_modal(frame: &mut Frame<'_>, area: Rect, app: &App) {
-    let Some(modal) = app.spawn_modal else {
+    let Some(modal) = app.spawn_modal.as_ref() else {
         return;
     };
 
-    let width = area.width.clamp(24, 36);
-    let max_list_rows = area.height.saturating_sub(4).max(1);
-    let list_rows = (app.definitions.len() as u16).min(max_list_rows);
-    let height = list_rows.saturating_add(2).min(area.height).max(3);
+    let width = area.width.clamp(36, 54);
+    let footer_rows = spawn_help_line_count() + 1;
+    let fixed_rows = 2 + footer_rows + 2;
+    let max_list_rows = area.height.saturating_sub(fixed_rows).max(1);
+    let list_rows = (modal.order.len() as u16).min(max_list_rows);
+    let height = list_rows
+        .saturating_add(fixed_rows)
+        .min(area.height)
+        .max(fixed_rows);
     let modal_area = centered_rect(area, width, height);
-    let visible_rows = modal_area.height.saturating_sub(2) as usize;
-    let selected = modal.selected.min(app.definitions.len().saturating_sub(1));
+    let visible_rows = modal_area.height.saturating_sub(fixed_rows) as usize;
+    let selected = modal.selected.min(modal.order.len().saturating_sub(1));
     let start = selected
         .saturating_add(1)
         .saturating_sub(visible_rows)
-        .min(app.definitions.len().saturating_sub(visible_rows));
-    let end = app
-        .definitions
-        .len()
-        .min(start.saturating_add(visible_rows));
-    let lines = app.definitions[start..end]
-        .iter()
-        .enumerate()
-        .map(|(offset, definition)| {
-            let index = start + offset;
-            let count = app
-                .entities
-                .iter()
-                .filter(|entity| entity.def == index)
-                .count();
-            let label = format!(
-                "{} {} ({count})",
-                if index == selected { ">" } else { " " },
-                definition.name
-            );
-            if index == selected {
-                Line::from(label).black().on_light_cyan()
-            } else {
-                Line::from(label)
-            }
-        })
-        .collect::<Vec<_>>();
+        .min(modal.order.len().saturating_sub(visible_rows));
+    let end = modal.order.len().min(start.saturating_add(visible_rows));
+    let inner_width = modal_area.width.saturating_sub(2) as usize;
+    let count_width = "# spawned".len();
+    let marker_width = 2;
+    let gap_width = 2;
+    let name_width = inner_width
+        .saturating_sub(marker_width + gap_width + count_width)
+        .max("name".len());
+    let mut lines = vec![
+        Line::from(format!(
+            "{:marker_width$}{:<name_width$}{:gap_width$}{:>count_width$}",
+            "", "name", "", "# spawned"
+        )),
+        Line::from(format!(
+            "{:marker_width$}{:-<name_width$}{:gap_width$}{:->count_width$}",
+            "", "", "", ""
+        )),
+    ];
+    lines.extend(
+        modal.order[start..end]
+            .iter()
+            .enumerate()
+            .map(|(offset, def_index)| {
+                let index = start + offset;
+                let definition = &app.definitions[*def_index];
+                let count = app
+                    .entities
+                    .iter()
+                    .filter(|entity| entity.def == *def_index)
+                    .count();
+                let name = fit_column(&definition.name, name_width);
+                let label = format!(
+                    "{:<marker_width$}{name}{:gap_width$}{count:>count_width$}",
+                    if index == selected { ">" } else { " " },
+                    ""
+                );
+                if index == selected {
+                    Line::from(label).black().on_light_cyan()
+                } else {
+                    Line::from(label)
+                }
+            }),
+    );
+    lines.push(Line::from(format!("{:-<inner_width$}", "")));
+    lines.extend(spawn_help_lines(inner_width));
 
     let block = Block::new()
         .title(" Spawn ")
         .borders(Borders::ALL)
         .border_type(BorderType::Rounded)
-        .border_style(Style::new().fg(Color::LightCyan))
+        .border_style(Style::new().fg(MODAL_BORDER))
         .style(Style::new().bg(Color::Black));
     let paragraph = Paragraph::new(lines)
         .block(block)
@@ -171,6 +226,153 @@ fn render_spawn_modal(frame: &mut Frame<'_>, area: Rect, app: &App) {
 
     frame.render_widget(Clear, modal_area);
     frame.render_widget(paragraph, modal_area);
+}
+
+fn fit_column(text: &str, width: usize) -> String {
+    let mut fitted = text.chars().take(width).collect::<String>();
+    let len = fitted.chars().count();
+    if len < width {
+        fitted.push_str(&" ".repeat(width - len));
+    }
+    fitted
+}
+
+fn spawn_help_line_count() -> u16 {
+    2
+}
+
+fn spawn_help_lines(width: usize) -> Vec<Line<'static>> {
+    vec![
+        shortcut_line(
+            &[
+                ("↑", true),
+                ("/", false),
+                ("↓", true),
+                (" select  ", false),
+                ("Enter", true),
+                (" spawn", false),
+            ],
+            width,
+            Color::DarkGray,
+        ),
+        shortcut_line(
+            &[
+                ("Esc", true),
+                ("/", false),
+                ("Ctrl", true),
+                ("+", false),
+                ("S", true),
+                (" close", false),
+            ],
+            width,
+            Color::DarkGray,
+        ),
+    ]
+}
+
+fn render_help_modal(frame: &mut Frame<'_>, area: Rect) {
+    let shortcuts = [
+        help_line(&[("?", true)], "show or hide help"),
+        help_line(&[("Esc", true)], "close modal / quit"),
+        help_line(&[("q", true)], "quit"),
+        help_line(&[("b", true)], "toggle water background"),
+        help_line(&[("t", true)], "toggle creature names"),
+        help_line(&[("+", true)], "spawn a random creature"),
+        help_line(&[("-", true)], "despawn a random creature"),
+        help_line(
+            &[("Ctrl", true), ("+", false), ("S", true)],
+            "open spawn menu",
+        ),
+        help_line(&[("←", true), ("/", false), ("→", true)], "scroll reef"),
+        help_line(
+            &[
+                ("Shift", true),
+                ("+", false),
+                ("↑", true),
+                ("/", false),
+                ("↓", true),
+            ],
+            "adjust speed",
+        ),
+    ];
+    let width = area.width.clamp(37, 42);
+    let height = ((shortcuts.len() + 2) as u16).min(area.height).max(3);
+    let modal_area = centered_rect(area, width, height);
+    let visible_rows = modal_area.height.saturating_sub(2) as usize;
+    let lines = shortcuts.into_iter().take(visible_rows).collect::<Vec<_>>();
+    let block = Block::new()
+        .title(" Help ")
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::new().fg(MODAL_BORDER))
+        .style(Style::new().bg(Color::Black));
+    let paragraph = Paragraph::new(lines)
+        .block(block)
+        .style(Style::new().bg(Color::Black));
+
+    frame.render_widget(Clear, modal_area);
+    frame.render_widget(paragraph, modal_area);
+}
+
+fn help_line(key_parts: &[(&'static str, bool)], description: &'static str) -> Line<'static> {
+    const KEY_WIDTH: usize = 9;
+
+    let key_style = key_style();
+    let plain_style = Style::new().fg(Color::White);
+    let key_len = key_parts
+        .iter()
+        .map(|(part, _)| part.chars().count())
+        .sum::<usize>();
+    let padding = KEY_WIDTH.saturating_sub(key_len) + 1;
+    let mut spans = key_parts
+        .iter()
+        .map(|(part, highlighted)| {
+            if *highlighted {
+                Span::styled(*part, key_style)
+            } else {
+                Span::styled(*part, plain_style)
+            }
+        })
+        .collect::<Vec<_>>();
+    spans.push(Span::styled(" ".repeat(padding), plain_style));
+    spans.push(Span::styled(description, plain_style));
+
+    Line::from(spans)
+}
+
+fn shortcut_line(
+    parts: &[(&'static str, bool)],
+    width: usize,
+    plain_color: Color,
+) -> Line<'static> {
+    let plain_style = Style::new().fg(plain_color);
+    let len = parts
+        .iter()
+        .map(|(part, _)| part.chars().count())
+        .sum::<usize>();
+    let mut spans = shortcut_spans(parts, plain_style);
+    if len < width {
+        spans.push(Span::styled(" ".repeat(width - len), plain_style));
+    }
+
+    Line::from(spans)
+}
+
+fn shortcut_spans(parts: &[(&'static str, bool)], plain_style: Style) -> Vec<Span<'static>> {
+    parts
+        .iter()
+        .map(|(part, highlighted)| {
+            if *highlighted {
+                Span::styled(*part, key_style())
+            } else {
+                Span::styled(*part, plain_style)
+            }
+        })
+        .collect()
+}
+
+fn key_style() -> Style {
+    Style::new().fg(KEY_HIGHLIGHT).add_modifier(Modifier::BOLD)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -452,4 +654,177 @@ fn centered_rect(area: Rect, width: u16, height: u16) -> Rect {
         width.min(area.width),
         height.min(area.height),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use ratatui::{Terminal, backend::TestBackend, layout::Rect};
+
+    use super::*;
+    use crate::{
+        app::{App, SpawnModal},
+        config::load_config,
+        creature::load_creatures,
+    };
+
+    #[test]
+    fn reef_surface_renders_help_hint_overlay() {
+        let config = load_config("config.kdl".as_ref()).expect("config loads");
+        let definitions = load_creatures("art/creatures".as_ref()).expect("creatures load");
+        let app = App::new(config, definitions, Rect::new(0, 0, 80, 30)).expect("app starts");
+        let backend = TestBackend::new(80, 30);
+        let mut terminal = Terminal::new(backend).expect("terminal starts");
+
+        terminal.draw(|frame| render(frame, &app)).expect("draws");
+
+        let buffer = terminal.backend().buffer();
+        let rendered = (0..25)
+            .filter_map(|x| buffer.cell((x, 0)))
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert_eq!(rendered, "~~ reefs ~~ ? help ~~~~~~");
+        let help_key = buffer.cell((12, 0)).expect("surface help key");
+        assert_eq!(help_key.fg, Color::Green);
+        assert!(help_key.modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn spawn_modal_renders_aligned_table_headers() {
+        let config = load_config("config.kdl".as_ref()).expect("config loads");
+        let definitions = load_creatures("art/creatures".as_ref()).expect("creatures load");
+        let mut app = App::new(config, definitions, Rect::new(0, 0, 80, 30)).expect("app starts");
+        app.spawn_modal = Some(SpawnModal {
+            selected: 0,
+            order: (0..app.definitions.len()).collect(),
+        });
+        let backend = TestBackend::new(80, 30);
+        let mut terminal = Terminal::new(backend).expect("terminal starts");
+
+        terminal.draw(|frame| render(frame, &app)).expect("draws");
+
+        let buffer = terminal.backend().buffer();
+        let rows = (0..30)
+            .map(|y| {
+                (0..80)
+                    .filter_map(|x| buffer.cell((x, y)))
+                    .map(|cell| cell.symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            rows.iter()
+                .any(|row| row.contains("name                                     # spawned"))
+        );
+        assert!(
+            rows.iter()
+                .any(|row| row.contains("---------------------------------------  ---------"))
+        );
+        assert!(
+            rows.iter()
+                .any(|row| row.contains("↑/↓ select  Enter spawn"))
+        );
+        assert!(rows.iter().any(|row| row.contains("Esc/Ctrl+S close")));
+
+        let (row_index, row) = rows
+            .iter()
+            .enumerate()
+            .find(|(_, row)| row.contains("Esc/Ctrl+S close"))
+            .expect("spawn hint row is rendered");
+        let key_start = row.find("Esc/Ctrl+S").expect("spawn hint key starts");
+        let key_x = row[..key_start].chars().count() as u16;
+        let y = row_index as u16;
+        let esc_cell = buffer.cell((key_x, y)).expect("Esc cell");
+        let slash_cell = buffer.cell((key_x + 3, y)).expect("slash cell");
+        let ctrl_cell = buffer.cell((key_x + 4, y)).expect("Ctrl cell");
+        let plus_cell = buffer.cell((key_x + 8, y)).expect("plus cell");
+        let s_cell = buffer.cell((key_x + 9, y)).expect("S cell");
+
+        assert_eq!(esc_cell.fg, Color::Green);
+        assert!(esc_cell.modifier.contains(Modifier::BOLD));
+        assert!(!slash_cell.modifier.contains(Modifier::BOLD));
+        assert_eq!(ctrl_cell.fg, Color::Green);
+        assert!(ctrl_cell.modifier.contains(Modifier::BOLD));
+        assert!(!plus_cell.modifier.contains(Modifier::BOLD));
+        assert_eq!(s_cell.fg, Color::Green);
+        assert!(s_cell.modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn help_modal_excludes_spawn_menu_hints() {
+        let config = load_config("config.kdl".as_ref()).expect("config loads");
+        let definitions = load_creatures("art/creatures".as_ref()).expect("creatures load");
+        let mut app = App::new(config, definitions, Rect::new(0, 0, 80, 30)).expect("app starts");
+        app.show_help = true;
+        let backend = TestBackend::new(80, 30);
+        let mut terminal = Terminal::new(backend).expect("terminal starts");
+
+        terminal.draw(|frame| render(frame, &app)).expect("draws");
+
+        let buffer = terminal.backend().buffer();
+        let rows = (0..30)
+            .map(|y| {
+                (0..80)
+                    .filter_map(|x| buffer.cell((x, y)))
+                    .map(|cell| cell.symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            !rows
+                .iter()
+                .any(|row| row.contains("Spawn menu: Up/Down select, Enter spawn"))
+        );
+    }
+
+    #[test]
+    fn help_modal_aligns_and_highlights_key_tokens() {
+        let config = load_config("config.kdl".as_ref()).expect("config loads");
+        let definitions = load_creatures("art/creatures".as_ref()).expect("creatures load");
+        let mut app = App::new(config, definitions, Rect::new(0, 0, 80, 30)).expect("app starts");
+        app.show_help = true;
+        let backend = TestBackend::new(80, 30);
+        let mut terminal = Terminal::new(backend).expect("terminal starts");
+
+        terminal.draw(|frame| render(frame, &app)).expect("draws");
+
+        let buffer = terminal.backend().buffer();
+        let rows = (0..30)
+            .map(|y| {
+                (0..80)
+                    .filter_map(|x| buffer.cell((x, y)))
+                    .map(|cell| cell.symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            rows.iter()
+                .any(|row| row.contains("?         show or hide help"))
+        );
+        assert!(
+            rows.iter()
+                .any(|row| row.contains("Ctrl+S    open spawn menu"))
+        );
+        assert!(
+            rows.iter()
+                .any(|row| row.contains("Shift+↑/↓ adjust speed"))
+        );
+
+        let (row_index, row) = rows
+            .iter()
+            .enumerate()
+            .find(|(_, row)| row.contains("Ctrl+S    open spawn menu"))
+            .expect("Ctrl+S row is rendered");
+        let key_start = row.find("Ctrl+S").expect("Ctrl+S text starts");
+        let key_x = row[..key_start].chars().count() as u16;
+        let y = row_index as u16;
+        let ctrl_cell = buffer.cell((key_x, y)).expect("Ctrl cell");
+        let plus_cell = buffer.cell((key_x + 4, y)).expect("plus cell");
+        let s_cell = buffer.cell((key_x + 5, y)).expect("S cell");
+
+        assert_eq!(ctrl_cell.fg, Color::Green);
+        assert!(ctrl_cell.modifier.contains(Modifier::BOLD));
+        assert!(!plus_cell.modifier.contains(Modifier::BOLD));
+        assert_eq!(s_cell.fg, Color::Green);
+        assert!(s_cell.modifier.contains(Modifier::BOLD));
+    }
 }
