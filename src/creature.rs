@@ -13,6 +13,11 @@ use ratatui::{layout::Rect, style::Color};
 
 use crate::kdl_parse;
 
+pub const IDLE_ACTION_INTERVAL: u64 = 4;
+pub const DEFAULT_IDLE_MOVE_CHANCE: f64 = 0.30;
+pub const DEFAULT_IDLE_TURN_CHANCE: f64 = 0.05;
+pub const IDLE_CHANCE_STEP: f64 = 0.05;
+
 #[derive(Debug, Clone)]
 pub struct CreatureDef {
     pub name: String,
@@ -182,8 +187,8 @@ impl CreatureDef {
                 (min, max.max(min))
             }
             ActivityState::Idle => {
-                let min = lerp_u16(5, 22, stillness);
-                let max = lerp_u16(12, 88, (stillness - activity * 0.25).clamp(0.0, 1.0));
+                let min = lerp_u16(10, 44, stillness);
+                let max = lerp_u16(24, 176, (stillness - activity * 0.25).clamp(0.0, 1.0));
                 (min, max.max(min))
             }
         };
@@ -425,6 +430,8 @@ pub struct Entity {
     pub school_rearrangements: u64,
     pub activity: ActivityState,
     pub activity_ticks: u16,
+    pub idle_move_chance: f64,
+    pub idle_turn_chance: f64,
     pub territory: Option<Territory>,
 }
 
@@ -442,14 +449,17 @@ impl Entity {
         def: &CreatureDef,
         bounds: Rect,
         variant: &Variant,
+        tick: u64,
         rng: &mut ThreadRng,
     ) {
+        let was_idle = self.activity == ActivityState::Idle;
         self.advance_activity(def, rng);
         if self.activity == ActivityState::Idle {
-            self.dx = 0;
-            self.dy = 0;
-            self.pose_intent = PoseIntent::Lateral;
+            self.update_idle_motion(tick, rng);
             return;
+        }
+        if was_idle && self.dx == 0 {
+            self.resume_lateral_motion();
         }
 
         if def.brownian && rng.random_bool(0.25) {
@@ -501,6 +511,59 @@ impl Entity {
         self.dy = 0;
         self.pose_intent = PoseIntent::Lateral;
         self.depth_swim_ticks = 0;
+    }
+
+    pub fn pose_dx(&self) -> i16 {
+        if self.dx != 0 {
+            self.dx
+        } else if self.activity == ActivityState::Idle {
+            self.facing_dx()
+        } else {
+            0
+        }
+    }
+
+    pub fn animation_tick(&self, tick: u64) -> u64 {
+        if self.activity == ActivityState::Idle {
+            0
+        } else {
+            tick
+        }
+    }
+
+    pub fn update_idle_motion(&mut self, tick: u64, rng: &mut ThreadRng) {
+        self.dy = 0;
+        self.pose_intent = PoseIntent::Lateral;
+
+        if self.lateral_dx == 0 {
+            self.lateral_dx = if rng.random_bool(0.5) { -1 } else { 1 };
+        }
+
+        if !tick.is_multiple_of(IDLE_ACTION_INTERVAL) {
+            self.dx = 0;
+            return;
+        }
+
+        if rng.random_bool(self.idle_turn_chance.clamp(0.0, 1.0)) {
+            self.lateral_dx = -self.facing_dx();
+            self.dx = 0;
+            self.reset_idle_chances();
+        } else if rng.random_bool(self.idle_move_chance.clamp(0.0, 1.0)) {
+            self.dx = self.facing_dx();
+            self.idle_move_chance = (self.idle_move_chance - IDLE_CHANCE_STEP).max(0.0);
+            self.idle_turn_chance = (self.idle_turn_chance + IDLE_CHANCE_STEP).min(1.0);
+        } else {
+            self.dx = 0;
+        }
+    }
+
+    fn facing_dx(&self) -> i16 {
+        if self.lateral_dx < 0 { -1 } else { 1 }
+    }
+
+    fn reset_idle_chances(&mut self) {
+        self.idle_move_chance = DEFAULT_IDLE_MOVE_CHANCE;
+        self.idle_turn_chance = DEFAULT_IDLE_TURN_CHANCE;
     }
 
     pub fn toggle_vertical_motion(&mut self, rng: &mut ThreadRng) {
@@ -1396,6 +1459,65 @@ face ###"""
     }
 
     #[test]
+    fn default_animal_idle_duration_is_about_twice_the_original_range() {
+        let bumble = load_creature(Path::new("art/creatures/bumble.kdl")).expect("bumble loads");
+        let stillness = (bumble.preferences.sedentary
+            + bumble.preferences.planktonic
+            + kindom_stillness(bumble.kindom))
+            / 3.0;
+        let activity = bumble.preferences.nektonic;
+
+        assert_eq!(lerp_u16(10, 44, stillness), 13);
+        assert_eq!(
+            lerp_u16(24, 176, (stillness - activity * 0.25).clamp(0.0, 1.0)),
+            24
+        );
+    }
+
+    #[test]
+    fn idle_pose_uses_facing_direction_and_freezes_animation_tick() {
+        let entity = test_entity(ActivityState::Idle, -1);
+
+        assert_eq!(entity.pose_dx(), -1);
+        assert_eq!(entity.animation_tick(99), 0);
+    }
+
+    #[test]
+    fn idle_move_advances_facing_direction_and_adjusts_chances() {
+        let mut rng = rand::rng();
+        let mut entity = test_entity(ActivityState::Idle, -1);
+        entity.idle_move_chance = 1.0;
+        entity.idle_turn_chance = 0.0;
+
+        entity.update_idle_motion(IDLE_ACTION_INTERVAL, &mut rng);
+
+        assert_eq!(entity.dx, -1);
+        assert_eq!(entity.dy, 0);
+        assert_eq!(entity.lateral_dx, -1);
+        assert!((entity.idle_move_chance - 0.95).abs() < f64::EPSILON);
+        assert!((entity.idle_turn_chance - 0.05).abs() < f64::EPSILON);
+
+        entity.update_idle_motion(IDLE_ACTION_INTERVAL + 1, &mut rng);
+        assert_eq!(entity.dx, 0);
+        assert_eq!(entity.pose_dx(), -1);
+    }
+
+    #[test]
+    fn idle_turn_flips_facing_direction_and_resets_chances() {
+        let mut rng = rand::rng();
+        let mut entity = test_entity(ActivityState::Idle, -1);
+        entity.idle_move_chance = 0.80;
+        entity.idle_turn_chance = 1.0;
+
+        entity.update_idle_motion(IDLE_ACTION_INTERVAL, &mut rng);
+
+        assert_eq!(entity.dx, 0);
+        assert_eq!(entity.lateral_dx, 1);
+        assert!((entity.idle_move_chance - DEFAULT_IDLE_MOVE_CHANCE).abs() < f64::EPSILON);
+        assert!((entity.idle_turn_chance - DEFAULT_IDLE_TURN_CHANCE).abs() < f64::EPSILON);
+    }
+
+    #[test]
     fn detects_four_way_swimmers_from_pose_set() {
         let creatures = load_creatures(Path::new("art/creatures")).expect("creatures load");
         let four_way = creatures
@@ -1526,5 +1648,27 @@ o o
         ));
         fs::create_dir_all(&dir).expect("test creature dir created");
         dir
+    }
+
+    fn test_entity(activity: ActivityState, lateral_dx: i16) -> Entity {
+        Entity {
+            def: 0,
+            x: 0,
+            y: 0,
+            dx: 0,
+            dy: 0,
+            phase: 0,
+            color: Color::White,
+            respawn_at: None,
+            pose_intent: PoseIntent::Lateral,
+            lateral_dx,
+            depth_swim_ticks: 0,
+            school_rearrangements: 0,
+            activity,
+            activity_ticks: 1,
+            idle_move_chance: DEFAULT_IDLE_MOVE_CHANCE,
+            idle_turn_chance: DEFAULT_IDLE_TURN_CHANCE,
+            territory: None,
+        }
     }
 }

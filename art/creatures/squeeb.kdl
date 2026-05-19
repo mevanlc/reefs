@@ -4,8 +4,22 @@ description "round head with two eyes and three short dangling tentacles; the ju
 sauce author=mevanlc date=20260430 license=CCBYSA4.0
 
 face ###"""
-    .-"-.
-   ( o o )
-    '-.-'
-    / | \
+ .-"-.
+( o o )
+ '-.-'
+ / | \
+"""###
+
+left ###"""
+ .-"-.
+( o o )
+ '-.-'
+ \ \ \
+"""###
+
+right ###"""
+ .-"-.
+( o o )
+ '-.-'
+ / / /
 """###

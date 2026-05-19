@@ -6,6 +6,10 @@ sauce author=anonymous license=unlicense
 motion "brownian"
 unit-motion "brownian" rearrange-chance=0.1
 
+preferences {
+    nektonic 0.85
+}
+
 left ###"""
    <>< <><
     <><  <><

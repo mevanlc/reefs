@@ -6,6 +6,10 @@ sauce author=mevanlc date=20260501 license=CCBYSA4.0
 motion "brownian"
 unit-motion "brownian" rearrange-chance=0.2
 
+preferences {
+    nektonic 0.85
+}
+
 face ###"""
    ~ ~
     ~  ~

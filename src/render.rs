@@ -446,7 +446,12 @@ fn render_creatures(
         }
 
         let def = &definitions[entity.def];
-        let variant = def.best_variant_for(entity.dx, entity.pose_intent, tick, entity.phase);
+        let variant = def.best_variant_for(
+            entity.pose_dx(),
+            entity.pose_intent,
+            entity.animation_tick(tick),
+            entity.phase,
+        );
         let style = Style::new().fg(entity.color).add_modifier(if def.brownian {
             Modifier::BOLD
         } else {

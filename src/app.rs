@@ -237,8 +237,12 @@ impl App {
                 for entity in &mut self.entities {
                     let def = &self.definitions[entity.def];
                     entity.maybe_rearrange_school(def, &mut rng);
-                    let variant = def.best_variant(entity.dx, self.tick, entity.phase);
-                    entity.tick_bounded(def, bounds, variant, &mut rng);
+                    let variant = def.best_variant(
+                        entity.pose_dx(),
+                        entity.animation_tick(self.tick),
+                        entity.phase,
+                    );
+                    entity.tick_bounded(def, bounds, variant, self.tick, &mut rng);
                 }
             }
             RuntimeMode::Reef(reef) => tick_reef(
@@ -508,6 +512,8 @@ fn tick_reef(
             entity.school_rearrangements = replacement.school_rearrangements;
             entity.activity = replacement.activity;
             entity.activity_ticks = replacement.activity_ticks;
+            entity.idle_move_chance = replacement.idle_move_chance;
+            entity.idle_turn_chance = replacement.idle_turn_chance;
             entity.territory = replacement.territory;
             entity.respawn_at = None;
             continue;
@@ -516,7 +522,7 @@ fn tick_reef(
         let def = &definitions[entity.def];
         entity.maybe_rearrange_school(def, rng);
         if def.is_floor_bound() {
-            let variant = def.best_variant_for(0, PoseIntent::Lateral, tick, entity.phase);
+            let variant = def.best_variant_for(0, PoseIntent::Lateral, 0, entity.phase);
             entity.dx = 0;
             entity.dy = 0;
             entity.activity = ActivityState::Idle;
@@ -525,14 +531,23 @@ fn tick_reef(
             continue;
         }
 
-        let motion_variant =
-            def.best_variant_for(entity.dx, entity.pose_intent, tick, entity.phase);
-        update_reef_motion(def, entity, &band, motion_variant, rng);
+        let motion_variant = def.best_variant_for(
+            entity.pose_dx(),
+            entity.pose_intent,
+            entity.animation_tick(tick),
+            entity.phase,
+        );
+        update_reef_motion(def, entity, &band, motion_variant, tick, rng);
 
         entity.x += entity.dx as i32;
         entity.y += entity.dy as i32;
 
-        let variant = def.best_variant_for(entity.dx, entity.pose_intent, tick, entity.phase);
+        let variant = def.best_variant_for(
+            entity.pose_dx(),
+            entity.pose_intent,
+            entity.animation_tick(tick),
+            entity.phase,
+        );
         if let Some(clamped_y) = band.clamp_y_for(entity.y, variant)
             && clamped_y != entity.y
         {
@@ -559,14 +574,17 @@ fn update_reef_motion(
     entity: &mut Entity,
     band: &WaterBand,
     variant: &Variant,
+    tick: u64,
     rng: &mut ThreadRng,
 ) {
+    let was_idle = entity.activity == ActivityState::Idle;
     entity.advance_activity(def, rng);
     if entity.activity == ActivityState::Idle {
-        entity.dx = 0;
-        entity.dy = 0;
-        entity.pose_intent = PoseIntent::Lateral;
+        entity.update_idle_motion(tick, rng);
         return;
+    }
+    if was_idle && entity.dx == 0 {
+        entity.resume_lateral_motion();
     }
 
     if def.four_way_swimmer {
@@ -718,7 +736,12 @@ fn rebind_creatures_to_reef(
         }
 
         let def = &definitions[entity.def];
-        let variant = def.best_variant_for(entity.dx, entity.pose_intent, tick, entity.phase);
+        let variant = def.best_variant_for(
+            entity.pose_dx(),
+            entity.pose_intent,
+            entity.animation_tick(tick),
+            entity.phase,
+        );
         if def.is_floor_bound() {
             if let Some(y) = band.floor_y_for(variant) {
                 entity.y = y;
@@ -791,6 +814,8 @@ fn spawn_tank_entity(
         school_rearrangements: 0,
         activity,
         activity_ticks,
+        idle_move_chance: crate::creature::DEFAULT_IDLE_MOVE_CHANCE,
+        idle_turn_chance: crate::creature::DEFAULT_IDLE_TURN_CHANCE,
         territory,
     }
 }
@@ -868,6 +893,8 @@ fn spawn_reef_entity(
         school_rearrangements: 0,
         activity,
         activity_ticks,
+        idle_move_chance: crate::creature::DEFAULT_IDLE_MOVE_CHANCE,
+        idle_turn_chance: crate::creature::DEFAULT_IDLE_TURN_CHANCE,
         territory,
     }
 }
@@ -1008,6 +1035,8 @@ mod tests {
             school_rearrangements: 0,
             activity: ActivityState::Active,
             activity_ticks: 1,
+            idle_move_chance: crate::creature::DEFAULT_IDLE_MOVE_CHANCE,
+            idle_turn_chance: crate::creature::DEFAULT_IDLE_TURN_CHANCE,
             territory: None,
         };
 
@@ -1038,6 +1067,8 @@ mod tests {
             school_rearrangements: 0,
             activity: ActivityState::Active,
             activity_ticks: 1,
+            idle_move_chance: crate::creature::DEFAULT_IDLE_MOVE_CHANCE,
+            idle_turn_chance: crate::creature::DEFAULT_IDLE_TURN_CHANCE,
             territory: None,
         };
 
