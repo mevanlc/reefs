@@ -10,7 +10,8 @@ use ratatui::{DefaultTerminal, Frame, layout::Rect, style::Color};
 use crate::{
     config::AppConfig,
     creature::{
-        ActivityState, CreatureDef, Entity, PoseIntent, Territory, Variant, tallest_variant_height,
+        ActivityState, CreatureDef, CreaturePreferences, Entity, PoseIntent, Territory, Variant,
+        tallest_variant_height,
     },
     render,
     world::{ReefWorld, WorldBounds, load_world_layer},
@@ -21,6 +22,8 @@ const MIN_TICK_RATE: Duration = Duration::from_millis(10);
 const MAX_TICK_RATE: Duration = Duration::from_millis(3000);
 const TICK_RATE_STEP: Duration = Duration::from_millis(20);
 const SCROLL_STEP: i32 = 4;
+const MIN_SPAWN_DEPTH_JITTER: f64 = 0.12;
+const MAX_SPAWN_DEPTH_JITTER: f64 = 0.35;
 
 pub struct App {
     pub(crate) definitions: Vec<CreatureDef>,
@@ -608,10 +611,7 @@ fn apply_depth_bias(
     }
 
     let preferences = &def.preferences;
-    let mut target = preferences.depth;
-    target += preferences.demersal * (1.0 - target) * 0.4;
-    target -= preferences.reefer * target * 0.25;
-    target = target.clamp(0.0, 1.0);
+    let target = preferred_depth_target(preferences);
 
     let target_y = min_y + ((max_y - min_y) as f64 * target).round() as i32;
     let distance = target_y - entity.y;
@@ -622,16 +622,60 @@ fn apply_depth_bias(
         return;
     }
 
-    let preference_strength = (preferences
-        .demersal
-        .max(preferences.reefer)
-        .max((preferences.depth - 0.5).abs() * 2.0)
-        * 0.35
-        + 0.08)
-        .clamp(0.0, 0.6);
+    let preference_strength =
+        (depth_preference_strength(preferences) * 0.35 + 0.08).clamp(0.0, 0.6);
     if rng.random_bool(preference_strength) {
         entity.dy = distance.signum() as i16;
     }
+}
+
+fn preferred_depth_target(preferences: &CreaturePreferences) -> f64 {
+    let mut target = preferences.depth;
+    target += preferences.demersal * (1.0 - target) * 0.4;
+    target -= preferences.reefer * target * 0.25;
+    target.clamp(0.0, 1.0)
+}
+
+fn depth_preference_strength(preferences: &CreaturePreferences) -> f64 {
+    preferences
+        .demersal
+        .max(preferences.reefer)
+        .max((preferences.depth - 0.5).abs() * 2.0)
+        .clamp(0.0, 1.0)
+}
+
+fn preferred_spawn_y_for(
+    preferences: &CreaturePreferences,
+    band: &WaterBand,
+    variant: &Variant,
+    rng: &mut ThreadRng,
+) -> Option<i32> {
+    let (min_y, max_y) = band.y_bounds_for(variant)?;
+    let (min_y, max_y) = preferred_spawn_y_range(preferences, min_y, max_y);
+    Some(rng.random_range(min_y..=max_y))
+}
+
+fn preferred_spawn_y_range(
+    preferences: &CreaturePreferences,
+    min_y: i32,
+    max_y: i32,
+) -> (i32, i32) {
+    if min_y >= max_y {
+        return (min_y, max_y);
+    }
+
+    let target = preferred_depth_target(preferences);
+    let span = max_y - min_y;
+    let target_y = min_y + (span as f64 * target).round() as i32;
+    let jitter_fraction = MAX_SPAWN_DEPTH_JITTER
+        - (MAX_SPAWN_DEPTH_JITTER - MIN_SPAWN_DEPTH_JITTER)
+            * depth_preference_strength(preferences);
+    let jitter = (span as f64 * jitter_fraction).round() as i32;
+
+    (
+        target_y.saturating_sub(jitter).clamp(min_y, max_y),
+        target_y.saturating_add(jitter).clamp(min_y, max_y),
+    )
 }
 
 fn apply_territory_bias(def: &CreatureDef, entity: &mut Entity, rng: &mut ThreadRng) {
@@ -792,7 +836,7 @@ fn spawn_reef_entity(
     let y = if def.is_floor_bound() {
         band.floor_y_for(variant).unwrap_or(band.top)
     } else {
-        band.random_y_for(variant, rng).unwrap_or(band.top)
+        preferred_spawn_y_for(&def.preferences, &band, variant, rng).unwrap_or(band.top)
     };
     let (dx, dy) = if def.is_floor_bound() {
         (0, 0)
@@ -1058,6 +1102,28 @@ mod tests {
         let band = WaterBand { top: 1, bottom: 5 };
 
         assert_eq!(band.clamp_y_for(4, &variant), Some(3));
+    }
+
+    #[test]
+    fn preferred_spawn_depth_range_centers_near_target_with_jitter() {
+        let preferences = CreaturePreferences {
+            demersal: 0.8,
+            depth: 0.9,
+            ..CreaturePreferences::default()
+        };
+
+        let target = preferred_depth_target(&preferences);
+        let (min_y, max_y) = preferred_spawn_y_range(&preferences, 0, 100);
+
+        assert!((target - 0.932).abs() < f64::EPSILON);
+        assert_eq!((min_y, max_y), (76, 100));
+    }
+
+    #[test]
+    fn neutral_spawn_depth_range_keeps_broad_vertical_variation() {
+        let preferences = CreaturePreferences::default();
+
+        assert_eq!(preferred_spawn_y_range(&preferences, 0, 100), (15, 85));
     }
 
     #[test]

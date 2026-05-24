@@ -5,6 +5,11 @@ sauce author=mevanlc date=20260513 license=CCBYSA4.0
 
 count 4
 
+preferences {
+    demersal 0.9
+    depth 0.8
+}
+
 left ###"""
  -'\
    @

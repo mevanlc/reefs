@@ -48,7 +48,7 @@ likely a creature is to engage in any given preference-seeking/goal-seeking beha
 plant might have a "rigid" preference of 1.0 meaning it doesn't bend when acted
 (and perhaps might be more likely to break.) Preferences that are commented with
 what a "high" value means but are not commented with what a "low" value means,
-means that preference has no special influence towards lower values. Similarly
+means that preference has no special influence at 0.0. Similarly
 for comments on "low" that omit descriptions of what "high" does.
 */
 preferences {

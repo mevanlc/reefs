@@ -1,7 +1,7 @@
 reef {
     horizontal {
         size infinite
-        scroll enabled=#true offscreen-pages=0.5
+        scroll enabled=#false offscreen-pages=0.3
         floor file="art/world/floor1.kdl" chunkgen=random color=green
         surface file="art/world/surface1.kdl" chunkgen=random color=blue
     }
