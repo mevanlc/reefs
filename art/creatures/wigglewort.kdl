@@ -6,6 +6,8 @@ sauce author=mevanlc date=20260512 license=CCBYSA4.0
 
 count 8
 
+animation hold-chance=0.15
+
 h-velocity 0
 v-velocity 0
 

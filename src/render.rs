@@ -434,7 +434,7 @@ fn render_creatures(
     area: Rect,
     definitions: &[CreatureDef],
     entities: &[Entity],
-    tick: u64,
+    _tick: u64,
     viewport_x: i32,
     show_names: bool,
 ) {
@@ -449,7 +449,7 @@ fn render_creatures(
         let variant = def.best_variant_for(
             entity.pose_dx_for(def),
             entity.pose_intent,
-            entity.animation_tick_for(def, tick),
+            entity.animation_tick_for(def, entity.animation_frame_tick),
             entity.phase,
         );
         let style = Style::new().fg(entity.color).add_modifier(if def.brownian {

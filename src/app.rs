@@ -243,6 +243,7 @@ impl App {
                         def_index,
                         copy_index,
                         tank,
+                        self.tick,
                         &mut rng,
                     ),
                     RuntimeMode::Reef(reef) => spawn_reef_entity(
@@ -255,6 +256,7 @@ impl App {
                         &reef.world,
                         launch_area,
                         SpawnMode::Anywhere,
+                        self.tick,
                         &mut rng,
                     ),
                 };
@@ -271,10 +273,11 @@ impl App {
                 let bounds = Rect::new(0, 0, tank.width - 2, tank.height - 2);
                 for entity in &mut self.entities {
                     let def = &self.definitions[entity.def];
+                    entity.advance_animation(def, &mut rng);
                     entity.maybe_rearrange_school(def, &mut rng);
                     let variant = def.best_variant(
                         entity.pose_dx_for(def),
-                        entity.animation_tick_for(def, self.tick),
+                        entity.animation_tick_for(def, entity.animation_frame_tick),
                         entity.phase,
                     );
                     entity.tick_bounded(def, bounds, variant, self.tick, &mut rng);
@@ -465,6 +468,7 @@ impl App {
                 def_index,
                 copy_index,
                 tank,
+                self.tick,
                 &mut rng,
             ),
             RuntimeMode::Reef(reef) => spawn_reef_entity(
@@ -477,6 +481,7 @@ impl App {
                 &reef.world,
                 reef.last_area,
                 SpawnMode::Anywhere,
+                self.tick,
                 &mut rng,
             ),
         };
@@ -549,12 +554,14 @@ fn tick_reef(
                 &reef.world,
                 reef.last_area,
                 SpawnMode::Edge,
+                tick,
                 rng,
             );
             entity.x = replacement.x;
             entity.y = replacement.y;
             entity.dx = replacement.dx;
             entity.dy = replacement.dy;
+            entity.animation_frame_tick = replacement.animation_frame_tick;
             entity.phase = replacement.phase;
             entity.pose_intent = replacement.pose_intent;
             entity.lateral_dx = replacement.lateral_dx;
@@ -570,9 +577,15 @@ fn tick_reef(
         }
 
         let def = &definitions[entity.def];
+        entity.advance_animation(def, rng);
         entity.maybe_rearrange_school(def, rng);
         if def.is_floor_bound() {
-            let variant = def.best_variant_for(0, PoseIntent::Lateral, 0, entity.phase);
+            let variant = def.best_variant_for(
+                0,
+                PoseIntent::Lateral,
+                entity.animation_tick_for(def, entity.animation_frame_tick),
+                entity.phase,
+            );
             entity.dx = 0;
             entity.dy = 0;
             entity.activity = ActivityState::Idle;
@@ -584,7 +597,7 @@ fn tick_reef(
         let motion_variant = def.best_variant_for(
             entity.pose_dx_for(def),
             entity.pose_intent,
-            entity.animation_tick_for(def, tick),
+            entity.animation_tick_for(def, entity.animation_frame_tick),
             entity.phase,
         );
         update_reef_motion(def, entity, &band, motion_variant, tick, rng);
@@ -595,7 +608,7 @@ fn tick_reef(
         let variant = def.best_variant_for(
             entity.pose_dx_for(def),
             entity.pose_intent,
-            entity.animation_tick_for(def, tick),
+            entity.animation_tick_for(def, entity.animation_frame_tick),
             entity.phase,
         );
         if let Some(clamped_y) = band.clamp_y_for(entity.y, variant)
@@ -776,7 +789,7 @@ fn rebind_creatures_to_reef(
     entities: &mut [Entity],
     world: &ReefWorld,
     area: Rect,
-    tick: u64,
+    _tick: u64,
     rng: &mut ThreadRng,
 ) {
     let band = WaterBand::for_reef(world, area.height);
@@ -789,7 +802,7 @@ fn rebind_creatures_to_reef(
         let variant = def.best_variant_for(
             entity.pose_dx_for(def),
             entity.pose_intent,
-            entity.animation_tick_for(def, tick),
+            entity.animation_tick_for(def, entity.animation_frame_tick),
             entity.phase,
         );
         if def.is_floor_bound() {
@@ -824,6 +837,7 @@ fn spawn_tank_entity(
     def_index: usize,
     copy_index: usize,
     tank: &TankState,
+    animation_frame_tick: u64,
     rng: &mut ThreadRng,
 ) -> Entity {
     let def = &colors.definitions[def_index];
@@ -861,6 +875,7 @@ fn spawn_tank_entity(
         y,
         dx,
         dy,
+        animation_frame_tick,
         phase: rng.random_range(0..8),
         color: entity_color(colors, def_index, rng),
         respawn_at: None,
@@ -883,6 +898,7 @@ fn spawn_reef_entity(
     world: &ReefWorld,
     area: Rect,
     mode: SpawnMode,
+    animation_frame_tick: u64,
     rng: &mut ThreadRng,
 ) -> Entity {
     let def = &colors.definitions[def_index];
@@ -940,6 +956,7 @@ fn spawn_reef_entity(
         y,
         dx,
         dy,
+        animation_frame_tick,
         phase: rng.random_range(0..8),
         color: entity_color(colors, def_index, rng),
         respawn_at: None,
@@ -1200,6 +1217,7 @@ mod tests {
             y: 1,
             dx: -1,
             dy: 0,
+            animation_frame_tick: 0,
             phase: 0,
             color: Color::White,
             respawn_at: None,
@@ -1232,6 +1250,7 @@ mod tests {
             y: 4,
             dx: 0,
             dy: 0,
+            animation_frame_tick: 0,
             phase: 0,
             color: Color::White,
             respawn_at: None,

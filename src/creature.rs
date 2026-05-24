@@ -34,6 +34,7 @@ pub struct CreatureDef {
     pub colors: Vec<Color>,
     default_movement: bool,
     school_rearrange_chance: Option<f64>,
+    animation_hold_chance: f64,
 }
 
 impl CreatureDef {
@@ -150,6 +151,10 @@ impl CreatureDef {
 
     pub fn school_rearrange_chance(&self) -> Option<f64> {
         self.school_rearrange_chance
+    }
+
+    pub fn animation_hold_chance(&self) -> f64 {
+        self.animation_hold_chance
     }
 
     pub fn is_floor_bound(&self) -> bool {
@@ -440,6 +445,7 @@ pub struct Entity {
     pub y: i32,
     pub dx: i16,
     pub dy: i16,
+    pub animation_frame_tick: u64,
     pub phase: usize,
     pub color: Color,
     pub respawn_at: Option<Instant>,
@@ -519,6 +525,15 @@ impl Entity {
 
     pub fn mark_exited(&mut self, delay: Duration, now: Instant) {
         self.respawn_at = Some(now + delay);
+    }
+
+    pub fn advance_animation(&mut self, def: &CreatureDef, rng: &mut ThreadRng) {
+        let hold_chance = def.animation_hold_chance().clamp(0.0, 1.0);
+        if hold_chance > 0.0 && rng.random_bool(hold_chance) {
+            return;
+        }
+
+        self.animation_frame_tick = self.animation_frame_tick.wrapping_add(1);
     }
 
     pub fn resume_lateral_motion(&mut self) {
@@ -647,6 +662,7 @@ struct CreatureTemplate {
     v_velocity: Option<i16>,
     spawn_location: Option<SpawnLocation>,
     colors: Option<Vec<Color>>,
+    animation_hold_chance: Option<f64>,
 }
 
 impl CreatureTemplate {
@@ -662,6 +678,7 @@ impl CreatureTemplate {
             v_velocity: None,
             spawn_location: None,
             colors: None,
+            animation_hold_chance: None,
         }
     }
 
@@ -677,6 +694,9 @@ impl CreatureTemplate {
         }
         if let Some(unit_motion) = doc.get("unit-motion") {
             self.unit_motion = Some(parse_unit_motion(unit_motion)?);
+        }
+        if let Some(animation) = doc.get("animation") {
+            self.animation_hold_chance = parse_animation(animation)?;
         }
         if let Some(h_velocity) = doc_int_arg(doc, "h-velocity") {
             self.h_velocity = Some(clamp_velocity(h_velocity));
@@ -831,6 +851,7 @@ fn load_creature_with_defaults(path: &Path, defaults: &KindomDefaults) -> Result
     let spawn_location = template.spawn_location.unwrap_or(SpawnLocation::Water);
     let count = template.count.unwrap_or(1);
     let colors = template.colors.unwrap_or_default();
+    let animation_hold_chance = template.animation_hold_chance.unwrap_or(0.0);
     let default_movement = template.motion.is_none()
         && template.h_velocity.is_none()
         && template.v_velocity.is_none()
@@ -877,6 +898,7 @@ fn load_creature_with_defaults(path: &Path, defaults: &KindomDefaults) -> Result
         colors,
         default_movement,
         school_rearrange_chance,
+        animation_hold_chance,
     })
 }
 
@@ -1014,6 +1036,10 @@ fn parse_unit_motion(node: &KdlNode) -> Result<UnitMotionTemplate> {
         brownian,
         rearrange_chance,
     })
+}
+
+fn parse_animation(node: &KdlNode) -> Result<Option<f64>> {
+    optional_probability_prop(node, "hold-chance")
 }
 
 fn parse_constraints(node: &KdlNode, path: &Path) -> Result<CreatureConstraints> {
@@ -1469,6 +1495,39 @@ face ###"""
     }
 
     #[test]
+    fn animation_hold_chance_defaults_to_zero_and_is_configurable() {
+        let bumble = load_creature(Path::new("art/creatures/bumble.kdl")).expect("bumble loads");
+        let wigglewort =
+            load_creature(Path::new("art/creatures/wigglewort.kdl")).expect("wigglewort loads");
+
+        assert_eq!(bumble.animation_hold_chance(), 0.0);
+        assert_eq!(wigglewort.animation_hold_chance(), 0.15);
+    }
+
+    #[test]
+    fn animation_hold_chance_can_stop_entity_animation_clock() {
+        let path = write_test_creature(
+            "animation-hold",
+            r####"
+name "animation-hold"
+animation hold-chance=1.0
+
+face ###"""
+<>
+"""###
+"####,
+        );
+        let creature = load_creature(&path).expect("animation hold creature loads");
+        let mut entity = test_entity(ActivityState::Active, 1);
+        entity.animation_frame_tick = 7;
+        let mut rng = rand::rng();
+
+        entity.advance_animation(&creature, &mut rng);
+
+        assert_eq!(entity.animation_frame_tick, 7);
+    }
+
+    #[test]
     fn creature_count_comes_from_count_param() {
         let boxfish = load_creature(Path::new("art/creatures/boxfish.kdl")).expect("boxfish loads");
 
@@ -1741,6 +1800,7 @@ o o
             y: 0,
             dx: 0,
             dy: 0,
+            animation_frame_tick: 0,
             phase: 0,
             color: Color::White,
             respawn_at: None,
