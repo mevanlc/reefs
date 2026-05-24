@@ -8,7 +8,7 @@ use rand::{RngExt, rngs::ThreadRng};
 use ratatui::{DefaultTerminal, Frame, layout::Rect, style::Color};
 
 use crate::{
-    config::{AppConfig, Mode},
+    config::AppConfig,
     creature::{
         ActivityState, CreatureDef, Entity, PoseIntent, Territory, Variant, tallest_variant_height,
     },
@@ -28,7 +28,7 @@ pub struct App {
     pub(crate) tick: u64,
     pub(crate) show_background: bool,
     pub(crate) show_creature_names: bool,
-    pub(crate) mode: RuntimeMode,
+    pub(crate) reef: ReefState,
     pub(crate) spawn_modal: Option<SpawnModal>,
     pub(crate) show_help: bool,
     creature_color_mode: CreatureColorMode,
@@ -47,16 +47,6 @@ pub enum CreatureColorMode {
 pub struct SpawnModal {
     pub selected: usize,
     pub order: Vec<usize>,
-}
-
-pub enum RuntimeMode {
-    Tank(TankState),
-    Reef(ReefState),
-}
-
-pub struct TankState {
-    pub width: u16,
-    pub height: u16,
 }
 
 pub struct ReefState {
@@ -135,38 +125,26 @@ impl App {
         launch_area: Rect,
         creature_color_mode: CreatureColorMode,
     ) -> Result<Self> {
-        let initial_count_scale = match config.mode {
-            Mode::Reef => config.reef.creatures.count_scale,
-            Mode::Tank => 1.0,
-        };
-        let mode = match config.mode {
-            Mode::Tank => RuntimeMode::Tank(TankState {
-                width: config.tank.width,
-                height: config.tank.height,
-            }),
-            Mode::Reef => {
-                let surface = load_world_layer(&config.reef.horizontal.surface)?;
-                let floor = load_world_layer(&config.reef.horizontal.floor)?;
-                let min_height = surface
-                    .height
-                    .saturating_add(floor.height)
-                    .saturating_add(tallest_variant_height(&definitions));
-                let world = ReefWorld::new(
-                    surface,
-                    floor,
-                    launch_area.width,
-                    config.reef.horizontal.offscreen_pages,
-                );
-
-                RuntimeMode::Reef(ReefState {
-                    world,
-                    respawn_delay: Duration::from_millis(config.reef.creatures.respawn_delay_ms),
-                    last_area: launch_area,
-                    min_height,
-                    scroll_enabled: config.reef.horizontal.scroll_enabled
-                        && !config.reef.vertical.scroll_enabled,
-                })
-            }
+        let initial_count_scale = config.reef.creatures.count_scale;
+        let surface = load_world_layer(&config.reef.horizontal.surface)?;
+        let floor = load_world_layer(&config.reef.horizontal.floor)?;
+        let min_height = surface
+            .height
+            .saturating_add(floor.height)
+            .saturating_add(tallest_variant_height(&definitions));
+        let world = ReefWorld::new(
+            surface,
+            floor,
+            launch_area.width,
+            config.reef.horizontal.offscreen_pages,
+        );
+        let reef = ReefState {
+            world,
+            respawn_delay: Duration::from_millis(config.reef.creatures.respawn_delay_ms),
+            last_area: launch_area,
+            min_height,
+            scroll_enabled: config.reef.horizontal.scroll_enabled
+                && !config.reef.vertical.scroll_enabled,
         };
 
         let mut app = Self {
@@ -175,7 +153,7 @@ impl App {
             tick: 0,
             show_background: false,
             show_creature_names: false,
-            mode,
+            reef,
             spawn_modal: None,
             show_help: false,
             creature_color_mode,
@@ -221,11 +199,8 @@ impl App {
     }
 
     #[cfg(test)]
-    fn min_height(&self) -> Option<u16> {
-        match &self.mode {
-            RuntimeMode::Tank(_) => None,
-            RuntimeMode::Reef(reef) => Some(reef.min_height),
-        }
+    fn min_height(&self) -> u16 {
+        self.reef.min_height
     }
 
     fn spawn_initial_entities(&mut self, count_scale: f64) {
@@ -234,31 +209,18 @@ impl App {
         for def_index in 0..self.definitions.len() {
             let count = scaled_initial_count(self.definitions[def_index].count, count_scale);
             for copy_index in 0..count {
-                let entity = match &self.mode {
-                    RuntimeMode::Tank(tank) => spawn_tank_entity(
-                        ColorSelection {
-                            definitions: &self.definitions,
-                            mode: self.creature_color_mode,
-                        },
-                        def_index,
-                        copy_index,
-                        tank,
-                        self.tick,
-                        &mut rng,
-                    ),
-                    RuntimeMode::Reef(reef) => spawn_reef_entity(
-                        ColorSelection {
-                            definitions: &self.definitions,
-                            mode: self.creature_color_mode,
-                        },
-                        def_index,
-                        copy_index,
-                        reef,
-                        SpawnMode::Anywhere,
-                        self.tick,
-                        &mut rng,
-                    ),
-                };
+                let entity = spawn_reef_entity(
+                    ColorSelection {
+                        definitions: &self.definitions,
+                        mode: self.creature_color_mode,
+                    },
+                    def_index,
+                    copy_index,
+                    &self.reef,
+                    SpawnMode::Anywhere,
+                    self.tick,
+                    &mut rng,
+                );
                 self.entities.push(entity);
             }
         }
@@ -267,52 +229,32 @@ impl App {
     fn tick(&mut self) {
         self.tick += 1;
         let mut rng = rand::rng();
-        match &mut self.mode {
-            RuntimeMode::Tank(tank) => {
-                let bounds = Rect::new(0, 0, tank.width - 2, tank.height - 2);
-                for entity in &mut self.entities {
-                    let def = &self.definitions[entity.def];
-                    entity.advance_animation(def, &mut rng);
-                    entity.maybe_rearrange_school(def, &mut rng);
-                    let variant = def.best_variant(
-                        entity.pose_dx_for(def),
-                        entity.animation_tick_for(def, entity.animation_frame_tick),
-                        entity.phase,
-                    );
-                    entity.tick_bounded(def, bounds, variant, self.tick, &mut rng);
-                }
-            }
-            RuntimeMode::Reef(reef) => tick_reef(
-                &self.definitions,
-                &mut self.entities,
-                self.tick,
-                reef,
-                self.creature_color_mode,
-                &mut rng,
-            ),
-        }
+        tick_reef(
+            &self.definitions,
+            &mut self.entities,
+            self.tick,
+            &mut self.reef,
+            self.creature_color_mode,
+            &mut rng,
+        );
     }
 
     fn scroll_reef(&mut self, delta: i32) {
-        if let RuntimeMode::Reef(reef) = &mut self.mode
-            && reef.scroll_enabled
-        {
-            reef.world.scroll_by(delta);
+        if self.reef.scroll_enabled {
+            self.reef.world.scroll_by(delta);
         }
     }
 
     fn handle_resize(&mut self, width: u16, height: u16) {
         let mut rng = rand::rng();
-        if let RuntimeMode::Reef(reef) = &mut self.mode {
-            reef.last_area = Rect::new(0, 0, width, height);
-            rebind_creatures_to_reef(
-                &self.definitions,
-                &mut self.entities,
-                reef,
-                self.tick,
-                &mut rng,
-            );
-        }
+        self.reef.last_area = Rect::new(0, 0, width, height);
+        rebind_creatures_to_reef(
+            &self.definitions,
+            &mut self.entities,
+            &self.reef,
+            self.tick,
+            &mut rng,
+        );
     }
 
     fn handle_key(&mut self, key: KeyEvent) -> bool {
@@ -457,31 +399,18 @@ impl App {
             .iter()
             .filter(|entity| entity.def == def_index)
             .count();
-        let entity = match &self.mode {
-            RuntimeMode::Tank(tank) => spawn_tank_entity(
-                ColorSelection {
-                    definitions: &self.definitions,
-                    mode: self.creature_color_mode,
-                },
-                def_index,
-                copy_index,
-                tank,
-                self.tick,
-                &mut rng,
-            ),
-            RuntimeMode::Reef(reef) => spawn_reef_entity(
-                ColorSelection {
-                    definitions: &self.definitions,
-                    mode: self.creature_color_mode,
-                },
-                def_index,
-                copy_index,
-                reef,
-                SpawnMode::Anywhere,
-                self.tick,
-                &mut rng,
-            ),
-        };
+        let entity = spawn_reef_entity(
+            ColorSelection {
+                definitions: &self.definitions,
+                mode: self.creature_color_mode,
+            },
+            def_index,
+            copy_index,
+            &self.reef,
+            SpawnMode::Anywhere,
+            self.tick,
+            &mut rng,
+        );
 
         self.entities.push(entity);
     }
@@ -827,65 +756,6 @@ struct ColorSelection<'a> {
     mode: CreatureColorMode,
 }
 
-fn spawn_tank_entity(
-    colors: ColorSelection<'_>,
-    def_index: usize,
-    copy_index: usize,
-    tank: &TankState,
-    animation_frame_tick: u64,
-    rng: &mut ThreadRng,
-) -> Entity {
-    let def = &colors.definitions[def_index];
-    let (dx, dy) = def.starting_velocity(rng);
-    let (activity, activity_ticks) = def.initial_activity(rng);
-    let variant = def.best_variant(dx, 0, def_index + copy_index);
-    let max_x = tank
-        .width
-        .saturating_sub(2)
-        .saturating_sub(variant.width)
-        .max(1) as i32;
-    let max_y = tank
-        .height
-        .saturating_sub(2)
-        .saturating_sub(variant.height)
-        .max(1) as i32;
-    let x = rng.random_range(0..=max_x);
-    let y = rng.random_range(0..=max_y);
-    let territory = assign_territory(
-        def,
-        x,
-        y,
-        TerritoryBounds {
-            min_x: 0,
-            max_x,
-            min_y: 0,
-            max_y,
-        },
-        rng,
-    );
-
-    Entity {
-        def: def_index,
-        x,
-        y,
-        dx,
-        dy,
-        animation_frame_tick,
-        phase: rng.random_range(0..8),
-        color: entity_color(colors, def_index, rng),
-        respawn_at: None,
-        pose_intent: PoseIntent::Lateral,
-        lateral_dx: dx,
-        depth_swim_ticks: 0,
-        school_rearrangements: 0,
-        activity,
-        activity_ticks,
-        idle_move_chance: crate::creature::DEFAULT_IDLE_MOVE_CHANCE,
-        idle_turn_chance: crate::creature::DEFAULT_IDLE_TURN_CHANCE,
-        territory,
-    }
-}
-
 fn spawn_reef_entity(
     colors: ColorSelection<'_>,
     def_index: usize,
@@ -1166,15 +1036,13 @@ mod tests {
 
         assert_eq!(
             app.min_height(),
-            Some(
-                app.definitions
-                    .iter()
-                    .flat_map(|definition| &definition.variants)
-                    .map(|variant| variant.height)
-                    .max()
-                    .unwrap()
-                    + 2
-            )
+            app.definitions
+                .iter()
+                .flat_map(|definition| &definition.variants)
+                .map(|variant| variant.height)
+                .max()
+                .unwrap()
+                + 2
         );
     }
 
@@ -1283,12 +1151,9 @@ mod tests {
             .position(|definition| definition.name == "wigglewort")
             .expect("wigglewort definition exists");
         let variant = app.definitions[def_index].best_variant(0, 0, 0);
-        let expected_y = match &app.mode {
-            RuntimeMode::Reef(reef) => WaterBand::for_reef(&reef.world, reef.last_area.height)
-                .floor_y_for(variant)
-                .expect("floor y fits"),
-            RuntimeMode::Tank(_) => unreachable!("test config uses reef mode"),
-        };
+        let expected_y = WaterBand::for_reef(&app.reef.world, app.reef.last_area.height)
+            .floor_y_for(variant)
+            .expect("floor y fits");
 
         for entity in app.entities.iter().filter(|entity| entity.def == def_index) {
             assert_eq!(entity.dx, 0);
@@ -1688,9 +1553,6 @@ mod tests {
     }
 
     fn reef_viewport_x(app: &App) -> i32 {
-        match &app.mode {
-            RuntimeMode::Reef(reef) => reef.world.viewport_x,
-            RuntimeMode::Tank(_) => unreachable!("test config uses reef mode"),
-        }
+        app.reef.world.viewport_x
     }
 }

@@ -3,13 +3,11 @@
 Implement the current `reef` mode described by `config.kdl`, supporting only the
 config shape that exists now:
 
-- `mode reef`
 - infinite horizontal size
 - terminal-dynamic vertical size
 - horizontal scroll enabled with `offscreen-pages`
 - floor and surface chunk art
 - creature `exit-world` plus delayed respawn
-- deferred tank mode improvements
 
 ## Goals
 
@@ -29,7 +27,6 @@ config shape that exists now:
 ## Non-Goals
 
 - Do not support config shapes beyond the current `config.kdl`.
-- Do not add tank mode improvements yet.
 - Do not add CLI config overrides.
 - Do not add advanced procedural terrain beyond random chunk selection from KDL.
 - Do not add save state or deterministic seeds.
@@ -43,7 +40,7 @@ config shape that exists now:
 - `src/world.rs`: world layer chunk loading, generated horizontal span, scroll
   offset, and offscreen page math.
 - `src/app.rs`: app state, input handling, and tick/update loop.
-- `src/render.rs`: reef/tank rendering and size warning.
+- `src/render.rs`: reef rendering and size warning.
 
 ## World Semantics
 
@@ -67,8 +64,6 @@ config shape that exists now:
   - a random valid height within the water band
   - a suitable direction into or across the world
 - After exit, respawn after configured `delay-ms`.
-- Existing tank bouncing remains deferred/unchanged except where module
-  extraction requires moving code.
 
 ## Resize Behavior
 
@@ -98,7 +93,7 @@ otherwise use the same 4-column step.
 1. Extract the existing creature loading, variant selection, entity movement, and
    tests into `src/creature.rs` without changing behavior.
 2. Add `src/config.rs` and parse the current `config.kdl` into typed structs,
-   including mode, reef horizontal/vertical settings, floor/surface layer files,
+   including reef horizontal/vertical settings, floor/surface layer files,
    creature edge behavior, and respawn delay.
 3. Add `src/world.rs` to load floor/surface chunk files and maintain launch-page
    width, offscreen extent, viewport offset, and generated chunks.
@@ -107,10 +102,8 @@ otherwise use the same 4-column step.
 5. Add `src/render.rs` for reef rendering, water background rendering, floor and
    surface rendering, creature projection from world coordinates to viewport
    coordinates, and size warning rendering.
-6. Wire `main.rs` to load config, load creatures, construct app state for the
-   selected mode, run the terminal app, and restore terminal/mouse state on exit.
-7. Keep tank mode available with current behavior, but avoid improving or
-   reshaping it beyond what the module split requires.
+6. Wire `main.rs` to load config, load creatures, construct reef app state, run
+   the terminal app, and restore terminal/mouse state on exit.
 
 ## Validation Plan
 

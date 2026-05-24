@@ -11,15 +11,7 @@ use crate::kdl_parse;
 
 #[derive(Debug, Clone)]
 pub struct AppConfig {
-    pub mode: Mode,
     pub reef: ReefConfig,
-    pub tank: TankConfig,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Mode {
-    Reef,
-    Tank,
 }
 
 #[derive(Debug, Clone)]
@@ -54,12 +46,6 @@ pub struct CreatureBehaviorConfig {
     pub count_scale: f64,
 }
 
-#[derive(Debug, Clone)]
-pub struct TankConfig {
-    pub width: u16,
-    pub height: u16,
-}
-
 pub fn load_config(path: &Path) -> Result<AppConfig> {
     let source =
         fs::read_to_string(path).wrap_err_with(|| format!("reading {}", path.display()))?;
@@ -69,16 +55,8 @@ pub fn load_config(path: &Path) -> Result<AppConfig> {
 }
 
 fn parse_config(doc: &KdlDocument) -> Result<AppConfig> {
-    let mode = match arg_string(required_node(doc, "mode")?, 0)? {
-        "reef" => Mode::Reef,
-        "tank" => Mode::Tank,
-        other => return Err(eyre!("unsupported mode {other:?}; expected reef or tank")),
-    };
-
     Ok(AppConfig {
-        mode,
         reef: parse_reef(required_node(doc, "reef")?)?,
-        tank: parse_tank(required_node(doc, "tank")?)?,
     })
 }
 
@@ -104,14 +82,6 @@ fn parse_reef(node: &KdlNode) -> Result<ReefConfig> {
             scroll_enabled: prop_bool(vertical_scroll, "enabled")?,
         },
         creatures: parse_creatures(creatures)?,
-    })
-}
-
-fn parse_tank(node: &KdlNode) -> Result<TankConfig> {
-    let size = child(node, "size")?;
-    Ok(TankConfig {
-        width: prop_u16(size, "width")?,
-        height: prop_u16(size, "height")?,
     })
 }
 
@@ -217,16 +187,6 @@ fn prop_float(node: &KdlNode, name: &str) -> Result<f64> {
         })
 }
 
-fn prop_u16(node: &KdlNode, name: &str) -> Result<u16> {
-    let value = prop_u64(node, name)?;
-    value.try_into().map_err(|_| {
-        eyre!(
-            "`{}` property `{name}` is too large for u16",
-            node.name().value()
-        )
-    })
-}
-
 fn prop_u64(node: &KdlNode, name: &str) -> Result<u64> {
     let value = node
         .get(name)
@@ -292,13 +252,10 @@ mod tests {
     fn loads_current_config_shape() {
         let config = load_config(Path::new("config.kdl")).expect("config loads");
 
-        assert_eq!(config.mode, Mode::Reef);
         assert!(config.reef.horizontal.scroll_enabled);
         assert_eq!(config.reef.horizontal.offscreen_pages, 0.5);
         assert!(!config.reef.vertical.scroll_enabled);
         assert_eq!(config.reef.creatures.respawn_delay_ms, 1000);
         assert_eq!(config.reef.creatures.count_scale, 2.0);
-        assert_eq!(config.tank.width, 120);
-        assert_eq!(config.tank.height, 40);
     }
 }

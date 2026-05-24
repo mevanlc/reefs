@@ -9,7 +9,7 @@ use std::{
 use color_eyre::eyre::{Result, WrapErr, eyre};
 use kdl::{KdlDocument, KdlNode, KdlValue};
 use rand::{RngExt, rngs::ThreadRng};
-use ratatui::{layout::Rect, style::Color};
+use ratatui::style::Color;
 
 use crate::kdl_parse;
 
@@ -469,56 +469,6 @@ pub struct Territory {
 }
 
 impl Entity {
-    pub fn tick_bounded(
-        &mut self,
-        def: &CreatureDef,
-        bounds: Rect,
-        variant: &Variant,
-        tick: u64,
-        rng: &mut ThreadRng,
-    ) {
-        let was_idle = self.activity == ActivityState::Idle;
-        self.advance_activity(def, rng);
-        if self.activity == ActivityState::Idle {
-            self.update_idle_motion(tick, rng);
-            return;
-        }
-        if was_idle && self.dx == 0 {
-            self.resume_lateral_motion();
-        }
-
-        if def.brownian && rng.random_bool(0.25) {
-            self.dx = rng.random_range(-1..=1);
-            self.dy = rng.random_range(-1..=1);
-        } else if def.uses_default_movement()
-            && rng.random_bool(default_movement_transition_chance())
-        {
-            self.toggle_vertical_motion(rng);
-        }
-
-        let max_x = (bounds.width.saturating_sub(variant.width).max(1) - 1) as i32;
-        let max_y = (bounds.height.saturating_sub(variant.height).max(1) - 1) as i32;
-
-        self.x += self.dx as i32;
-        self.y += self.dy as i32;
-
-        if self.x <= 0 {
-            self.x = 0;
-            self.dx = self.dx.abs().max(1);
-        } else if self.x >= max_x {
-            self.x = max_x;
-            self.dx = -self.dx.abs().max(1);
-        }
-
-        if self.y <= 0 {
-            self.y = 0;
-            self.dy = self.dy.abs();
-        } else if self.y >= max_y {
-            self.y = max_y;
-            self.dy = -self.dy.abs();
-        }
-    }
-
     pub fn is_active(&self) -> bool {
         self.respawn_at.is_none()
     }

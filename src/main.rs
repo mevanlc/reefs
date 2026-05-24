@@ -15,7 +15,6 @@ use crossterm::{
 
 use crate::{
     app::{App, CreatureColorMode},
-    config::Mode,
     creature::load_creatures,
 };
 
@@ -25,17 +24,14 @@ fn main() -> Result<()> {
     let options = parse_cli_args(env::args().skip(1))?;
     let config = config::load_config("config.kdl".as_ref())?;
     let definitions = load_creatures("art/creatures".as_ref())?;
-    let enable_mouse = matches!(config.mode, Mode::Reef);
 
     let mut terminal = ratatui::init();
     let mut mouse_enabled = false;
 
     let result = (|| -> Result<()> {
-        if enable_mouse {
-            let mut stdout = io::stdout();
-            execute!(stdout, EnableMouseCapture)?;
-            mouse_enabled = true;
-        }
+        let mut stdout = io::stdout();
+        execute!(stdout, EnableMouseCapture)?;
+        mouse_enabled = true;
 
         let launch_size = terminal.size()?;
         let launch_area = ratatui::layout::Rect::new(0, 0, launch_size.width, launch_size.height);

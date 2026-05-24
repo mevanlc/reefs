@@ -1,5 +1,3 @@
-mode reef /* vs tank*/
-
 reef {
     horizontal {
         size infinite
@@ -18,8 +16,4 @@ reef {
         respawn condition=after-exit-world delay-ms=1000
         count-scale 2.0
     }
-}
-
-tank {
-    size width=120 height=40
 }

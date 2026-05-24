@@ -8,7 +8,7 @@ use ratatui::{
 };
 
 use crate::{
-    app::{App, RuntimeMode, TankState, WaterBand},
+    app::{App, WaterBand},
     creature::{CreatureDef, Entity, School, Variant},
     world::ReefWorld,
 };
@@ -18,15 +18,10 @@ const KEY_HIGHLIGHT: Color = Color::Green;
 
 pub fn render(frame: &mut Frame<'_>, app: &App) {
     let area = frame.area();
-    match &app.mode {
-        RuntimeMode::Tank(tank) => render_tank(frame, area, app, tank),
-        RuntimeMode::Reef(reef) => {
-            if area.height < reef.min_height {
-                render_size_warning(frame, area, reef.min_height);
-            } else {
-                render_reef(frame, area, app, &reef.world);
-            }
-        }
+    if area.height < app.reef.min_height {
+        render_size_warning(frame, area, app.reef.min_height);
+    } else {
+        render_reef(frame, area, app, &app.reef.world);
     }
 
     if app.spawn_modal.is_some() {
@@ -36,55 +31,6 @@ pub fn render(frame: &mut Frame<'_>, app: &App) {
     if app.show_help {
         render_help_modal(frame, area);
     }
-}
-
-fn render_tank(frame: &mut Frame<'_>, area: Rect, app: &App, tank_state: &TankState) {
-    if area.width < tank_state.width || area.height < tank_state.height {
-        let message = Paragraph::new(vec![
-            Line::from(format!(
-                "Aquariuma needs a {}x{} terminal.",
-                tank_state.width, tank_state.height
-            )),
-            Line::from(format!("Current size: {}x{}", area.width, area.height)),
-            Line::from("Resize the terminal, or press q / Esc to quit."),
-        ])
-        .style(Style::new().fg(Color::LightCyan));
-        frame.render_widget(message, area);
-        return;
-    }
-
-    let tank = centered_rect(area, tank_state.width, tank_state.height);
-    let water = Rect::new(tank.x + 1, tank.y + 1, tank.width - 2, tank.height - 2);
-    let background_state = if app.show_background {
-        "bg on"
-    } else {
-        "bg off"
-    };
-    let block = Block::new()
-        .title(" Aquariuma ")
-        .title_bottom(format!(
-            " {} creatures | b {} | t names {} | q quit ",
-            app.entities.len(),
-            background_state,
-            if app.show_creature_names { "on" } else { "off" }
-        ))
-        .borders(Borders::ALL)
-        .border_style(Style::new().fg(Color::Blue))
-        .style(Style::new().bg(Color::Black));
-    frame.render_widget(block, tank);
-
-    if app.show_background {
-        render_water(frame, water, app.tick);
-    }
-    render_creatures(
-        frame,
-        water,
-        &app.definitions,
-        &app.entities,
-        app.tick,
-        0,
-        app.show_creature_names,
-    );
 }
 
 fn render_reef(frame: &mut Frame<'_>, area: Rect, app: &App, world: &ReefWorld) {
