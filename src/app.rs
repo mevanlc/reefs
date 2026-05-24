@@ -8,7 +8,7 @@ use rand::{RngExt, rngs::ThreadRng};
 use ratatui::{DefaultTerminal, Frame, layout::Rect, style::Color};
 
 use crate::{
-    config::AppConfig,
+    config::{AppConfig, ReefColorConfig},
     creature::{
         ActivityState, CreatureDef, CreaturePreferences, Entity, PoseIntent, Territory, Variant,
         tallest_variant_height,
@@ -37,6 +37,7 @@ pub struct App {
     pub(crate) spawn_modal: Option<SpawnModal>,
     pub(crate) show_help: bool,
     creature_color_mode: CreatureColorMode,
+    color_config: ReefColorConfig,
     tick_rate: Duration,
 }
 
@@ -131,6 +132,7 @@ impl App {
         creature_color_mode: CreatureColorMode,
     ) -> Result<Self> {
         let initial_count_scale = config.reef.creatures.count_scale;
+        let color_config = config.reef.colors;
         let surface = load_world_layer(&config.reef.horizontal.surface)?;
         let floor = load_world_layer(&config.reef.horizontal.floor)?;
         let min_height = surface
@@ -162,6 +164,7 @@ impl App {
             spawn_modal: None,
             show_help: false,
             creature_color_mode,
+            color_config,
             tick_rate: DEFAULT_TICK_RATE,
         };
         app.spawn_initial_entities(initial_count_scale);
@@ -224,6 +227,7 @@ impl App {
                     ColorSelection {
                         definitions: &self.definitions,
                         mode: self.creature_color_mode,
+                        config: self.color_config,
                     },
                     def_index,
                     copy_index,
@@ -247,6 +251,7 @@ impl App {
             self.tick,
             &mut self.reef,
             self.creature_color_mode,
+            self.color_config,
             &mut rng,
         );
     }
@@ -415,6 +420,7 @@ impl App {
             ColorSelection {
                 definitions: &self.definitions,
                 mode: self.creature_color_mode,
+                config: self.color_config,
             },
             def_index,
             copy_index,
@@ -481,6 +487,7 @@ fn tick_reef(
     tick: u64,
     reef: &mut ReefState,
     creature_color_mode: CreatureColorMode,
+    color_config: ReefColorConfig,
     rng: &mut ThreadRng,
 ) {
     if reef.last_area.height < reef.min_height {
@@ -506,6 +513,7 @@ fn tick_reef(
                 ColorSelection {
                     definitions,
                     mode: creature_color_mode,
+                    config: color_config,
                 },
                 entity.def,
                 copy_index,
@@ -865,6 +873,7 @@ enum SpawnMode {
 struct ColorSelection<'a> {
     definitions: &'a [CreatureDef],
     mode: CreatureColorMode,
+    config: ReefColorConfig,
 }
 
 fn spawn_reef_entity(
@@ -1004,15 +1013,26 @@ fn entity_color(colors: ColorSelection<'_>, def_index: usize, rng: &mut ThreadRn
         }
     }
 
-    colors.mode.random_global_color(rng)
+    colors.mode.random_global_color(colors.config, rng)
 }
 
 impl CreatureColorMode {
-    fn random_global_color(self, rng: &mut ThreadRng) -> Color {
+    fn random_global_color(self, config: ReefColorConfig, rng: &mut ThreadRng) -> Color {
         match self {
             Self::Ansi16 => ANSI_16_COLORS[rng.random_range(0..ANSI_16_COLORS.len())],
-            Self::Indexed256 => Color::Indexed(rng.random_range(0..=u8::MAX)),
-            Self::TrueColor => Color::Rgb(rng.random(), rng.random(), rng.random()),
+            Self::Indexed256 => Color::Indexed(brightened_256_color_index(
+                rng.random_range(0..=u8::MAX),
+                config.indexed256.random_color_brightness_min,
+            )),
+            Self::TrueColor => {
+                let (red, green, blue) = brighten_rgb_to_min_brightness(
+                    rng.random(),
+                    rng.random(),
+                    rng.random(),
+                    config.truecolor.random_color_brightness_min,
+                );
+                Color::Rgb(red, green, blue)
+            }
         }
     }
 
@@ -1093,6 +1113,47 @@ fn nearest_256_color_index(red: u8, green: u8, blue: u8) -> u8 {
             )
         })
         .expect("the 256-color palette is non-empty")
+}
+
+fn brightened_256_color_index(index: u8, brightness_min: f64) -> u8 {
+    if brightness_min <= 0.0 {
+        return index;
+    }
+
+    let (red, green, blue) = indexed_color_rgb(index);
+    let (red, green, blue) =
+        brighten_rgb_to_min_brightness(red, green, blue, brightness_min.clamp(0.0, 1.0));
+    nearest_256_color_index(red, green, blue)
+}
+
+fn brighten_rgb_to_min_brightness(
+    red: u8,
+    green: u8,
+    blue: u8,
+    brightness_min: f64,
+) -> (u8, u8, u8) {
+    let brightness_min = brightness_min.clamp(0.0, 1.0);
+    let brightness = perceived_brightness(red, green, blue);
+    if brightness >= brightness_min {
+        return (red, green, blue);
+    }
+
+    let mix = if brightness >= 1.0 {
+        0.0
+    } else {
+        ((brightness_min - brightness) / (1.0 - brightness)).clamp(0.0, 1.0)
+    };
+    let brighten = |channel: u8| {
+        (f64::from(channel) + (255.0 - f64::from(channel)) * mix)
+            .ceil()
+            .clamp(0.0, 255.0) as u8
+    };
+
+    (brighten(red), brighten(green), brighten(blue))
+}
+
+fn perceived_brightness(red: u8, green: u8, blue: u8) -> f64 {
+    (0.2126 * f64::from(red) + 0.7152 * f64::from(green) + 0.0722 * f64::from(blue)) / 255.0
 }
 
 fn color_distance_squared(a: (u8, u8, u8), b: (u8, u8, u8)) -> u32 {
@@ -1211,6 +1272,7 @@ mod tests {
             ColorSelection {
                 definitions: &app.definitions,
                 mode: app.creature_color_mode,
+                config: app.color_config,
             },
             def_index,
             0,
@@ -1250,6 +1312,7 @@ mod tests {
             ColorSelection {
                 definitions: &app.definitions,
                 mode: app.creature_color_mode,
+                config: app.color_config,
             },
             def_index,
             0,
@@ -1495,6 +1558,7 @@ mod tests {
             ColorSelection {
                 definitions: &definitions,
                 mode: CreatureColorMode::Indexed256,
+                config: ReefColorConfig::default(),
             },
             bertrand,
             &mut rng,
@@ -1507,15 +1571,39 @@ mod tests {
     fn color_modes_generate_requested_global_color_classes() {
         let mut rng = rand::rng();
 
-        assert!(ANSI_16_COLORS.contains(&CreatureColorMode::Ansi16.random_global_color(&mut rng)));
+        let color_config = ReefColorConfig::default();
+
+        assert!(
+            ANSI_16_COLORS
+                .contains(&CreatureColorMode::Ansi16.random_global_color(color_config, &mut rng))
+        );
         assert!(matches!(
-            CreatureColorMode::Indexed256.random_global_color(&mut rng),
+            CreatureColorMode::Indexed256.random_global_color(color_config, &mut rng),
             Color::Indexed(_)
         ));
         assert!(matches!(
-            CreatureColorMode::TrueColor.random_global_color(&mut rng),
+            CreatureColorMode::TrueColor.random_global_color(color_config, &mut rng),
             Color::Rgb(_, _, _)
         ));
+    }
+
+    #[test]
+    fn truecolor_global_random_brightness_floor_brightens_dark_colors() {
+        let floor = 0.3;
+        let color = brighten_rgb_to_min_brightness(1, 2, 3, floor);
+
+        assert_ne!(color, (1, 2, 3));
+        assert!(perceived_brightness(color.0, color.1, color.2) >= floor);
+    }
+
+    #[test]
+    fn indexed_global_random_brightness_floor_brightens_dark_colors() {
+        let floor = 0.3;
+        let index = brightened_256_color_index(0, floor);
+        let (red, green, blue) = indexed_color_rgb(index);
+
+        assert_ne!(index, 0);
+        assert!(perceived_brightness(red, green, blue) >= floor);
     }
 
     #[test]
@@ -1531,6 +1619,7 @@ mod tests {
             ColorSelection {
                 definitions: &definitions,
                 mode: CreatureColorMode::Ansi16,
+                config: ReefColorConfig::default(),
             },
             bertrand,
             &mut rng,

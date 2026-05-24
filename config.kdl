@@ -18,10 +18,10 @@ reef {
     }
 
     colors-256 {
-        minimum-brightness 0.3
+        random-color-brightness-min 0.3
     }
 
     colors-true {
-        minimum-brightness 0.3
+        random-color-brightness-min 0.3
     }
 }

@@ -19,6 +19,7 @@ pub struct ReefConfig {
     pub horizontal: HorizontalConfig,
     pub vertical: VerticalConfig,
     pub creatures: CreatureBehaviorConfig,
+    pub colors: ReefColorConfig,
 }
 
 #[derive(Debug, Clone)]
@@ -44,6 +45,17 @@ pub struct LayerConfig {
 pub struct CreatureBehaviorConfig {
     pub respawn_delay_ms: u64,
     pub count_scale: f64,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ReefColorConfig {
+    pub indexed256: ColorPoolConfig,
+    pub truecolor: ColorPoolConfig,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ColorPoolConfig {
+    pub random_color_brightness_min: f64,
 }
 
 pub fn load_config(path: &Path) -> Result<AppConfig> {
@@ -82,6 +94,7 @@ fn parse_reef(node: &KdlNode) -> Result<ReefConfig> {
             scroll_enabled: prop_bool(vertical_scroll, "enabled")?,
         },
         creatures: parse_creatures(creatures)?,
+        colors: parse_reef_colors(node)?,
     })
 }
 
@@ -103,6 +116,28 @@ fn parse_creatures(node: &KdlNode) -> Result<CreatureBehaviorConfig> {
             .map(|node| arg_non_negative_float(node, 0))
             .transpose()?
             .unwrap_or(1.0),
+    })
+}
+
+fn parse_reef_colors(node: &KdlNode) -> Result<ReefColorConfig> {
+    Ok(ReefColorConfig {
+        indexed256: optional_child(node, "colors-256")
+            .map(parse_color_pool)
+            .transpose()?
+            .unwrap_or_default(),
+        truecolor: optional_child(node, "colors-true")
+            .map(parse_color_pool)
+            .transpose()?
+            .unwrap_or_default(),
+    })
+}
+
+fn parse_color_pool(node: &KdlNode) -> Result<ColorPoolConfig> {
+    Ok(ColorPoolConfig {
+        random_color_brightness_min: optional_child(node, "random-color-brightness-min")
+            .map(|node| arg_unit_float(node, 0))
+            .transpose()?
+            .unwrap_or_default(),
     })
 }
 
@@ -152,6 +187,18 @@ fn arg_non_negative_float(node: &KdlNode, index: usize) -> Result<f64> {
     } else {
         Err(eyre!(
             "`{}` argument {index} must be a finite non-negative number",
+            node.name().value()
+        ))
+    }
+}
+
+fn arg_unit_float(node: &KdlNode, index: usize) -> Result<f64> {
+    let value = arg_non_negative_float(node, index)?;
+    if value <= 1.0 {
+        Ok(value)
+    } else {
+        Err(eyre!(
+            "`{}` argument {index} must be between 0.0 and 1.0",
             node.name().value()
         ))
     }
@@ -255,5 +302,13 @@ mod tests {
         assert!(!config.reef.vertical.scroll_enabled);
         assert_eq!(config.reef.creatures.respawn_delay_ms, 1000);
         assert_eq!(config.reef.creatures.count_scale, 1.9);
+        assert_eq!(
+            config.reef.colors.indexed256.random_color_brightness_min,
+            0.3
+        );
+        assert_eq!(
+            config.reef.colors.truecolor.random_color_brightness_min,
+            0.3
+        );
     }
 }
