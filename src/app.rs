@@ -181,7 +181,7 @@ impl App {
             creature_color_mode,
             tick_rate: DEFAULT_TICK_RATE,
         };
-        app.spawn_initial_entities(launch_area, initial_count_scale);
+        app.spawn_initial_entities(initial_count_scale);
         Ok(app)
     }
 
@@ -228,7 +228,7 @@ impl App {
         }
     }
 
-    fn spawn_initial_entities(&mut self, launch_area: Rect, count_scale: f64) {
+    fn spawn_initial_entities(&mut self, count_scale: f64) {
         let mut rng = rand::rng();
 
         for def_index in 0..self.definitions.len() {
@@ -253,8 +253,7 @@ impl App {
                         },
                         def_index,
                         copy_index,
-                        &reef.world,
-                        launch_area,
+                        reef,
                         SpawnMode::Anywhere,
                         self.tick,
                         &mut rng,
@@ -309,8 +308,7 @@ impl App {
             rebind_creatures_to_reef(
                 &self.definitions,
                 &mut self.entities,
-                &reef.world,
-                reef.last_area,
+                reef,
                 self.tick,
                 &mut rng,
             );
@@ -478,8 +476,7 @@ impl App {
                 },
                 def_index,
                 copy_index,
-                &reef.world,
-                reef.last_area,
+                reef,
                 SpawnMode::Anywhere,
                 self.tick,
                 &mut rng,
@@ -551,8 +548,7 @@ fn tick_reef(
                 },
                 entity.def,
                 copy_index,
-                &reef.world,
-                reef.last_area,
+                reef,
                 SpawnMode::Edge,
                 tick,
                 rng,
@@ -787,12 +783,11 @@ fn entity_exited(entity: &Entity, variant: &Variant, bounds: WorldBounds) -> boo
 fn rebind_creatures_to_reef(
     definitions: &[CreatureDef],
     entities: &mut [Entity],
-    world: &ReefWorld,
-    area: Rect,
+    reef: &ReefState,
     _tick: u64,
     rng: &mut ThreadRng,
 ) {
-    let band = WaterBand::for_reef(world, area.height);
+    let band = WaterBand::for_reef(&reef.world, reef.last_area.height);
     for entity in entities {
         if !entity.is_active() {
             continue;
@@ -895,8 +890,7 @@ fn spawn_reef_entity(
     colors: ColorSelection<'_>,
     def_index: usize,
     copy_index: usize,
-    world: &ReefWorld,
-    area: Rect,
+    reef: &ReefState,
     mode: SpawnMode,
     animation_frame_tick: u64,
     rng: &mut ThreadRng,
@@ -908,7 +902,7 @@ fn spawn_reef_entity(
     }
 
     let variant = def.best_variant(dx, 0, def_index + copy_index);
-    let bounds = world.simulated_bounds(area.width);
+    let bounds = reef.world.simulated_bounds(reef.last_area.width);
     let max_x = bounds
         .end
         .saturating_sub(variant.width as i32)
@@ -924,7 +918,7 @@ fn spawn_reef_entity(
         }
     };
 
-    let band = WaterBand::for_reef(world, area.height);
+    let band = WaterBand::for_reef(&reef.world, reef.last_area.height);
     let y = if def.is_floor_bound() {
         band.floor_y_for(variant).unwrap_or(band.top)
     } else {
