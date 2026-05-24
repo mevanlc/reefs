@@ -31,7 +31,16 @@ pub struct App {
     pub(crate) mode: RuntimeMode,
     pub(crate) spawn_modal: Option<SpawnModal>,
     pub(crate) show_help: bool,
+    creature_color_mode: CreatureColorMode,
     tick_rate: Duration,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum CreatureColorMode {
+    Ansi16,
+    #[default]
+    Indexed256,
+    TrueColor,
 }
 
 #[derive(Debug, Clone)]
@@ -106,10 +115,25 @@ impl WaterBand {
 }
 
 impl App {
+    #[cfg(test)]
     pub fn new(
         config: AppConfig,
         definitions: Vec<CreatureDef>,
         launch_area: Rect,
+    ) -> Result<Self> {
+        Self::new_with_color_mode(
+            config,
+            definitions,
+            launch_area,
+            CreatureColorMode::default(),
+        )
+    }
+
+    pub fn new_with_color_mode(
+        config: AppConfig,
+        definitions: Vec<CreatureDef>,
+        launch_area: Rect,
+        creature_color_mode: CreatureColorMode,
     ) -> Result<Self> {
         let initial_count_scale = match config.mode {
             Mode::Reef => config.reef.creatures.count_scale,
@@ -154,6 +178,7 @@ impl App {
             mode,
             spawn_modal: None,
             show_help: false,
+            creature_color_mode,
             tick_rate: DEFAULT_TICK_RATE,
         };
         app.spawn_initial_entities(launch_area, initial_count_scale);
@@ -210,11 +235,21 @@ impl App {
             let count = scaled_initial_count(self.definitions[def_index].count, count_scale);
             for copy_index in 0..count {
                 let entity = match &self.mode {
-                    RuntimeMode::Tank(tank) => {
-                        spawn_tank_entity(&self.definitions, def_index, copy_index, tank, &mut rng)
-                    }
+                    RuntimeMode::Tank(tank) => spawn_tank_entity(
+                        ColorSelection {
+                            definitions: &self.definitions,
+                            mode: self.creature_color_mode,
+                        },
+                        def_index,
+                        copy_index,
+                        tank,
+                        &mut rng,
+                    ),
                     RuntimeMode::Reef(reef) => spawn_reef_entity(
-                        &self.definitions,
+                        ColorSelection {
+                            definitions: &self.definitions,
+                            mode: self.creature_color_mode,
+                        },
                         def_index,
                         copy_index,
                         &reef.world,
@@ -250,6 +285,7 @@ impl App {
                 &mut self.entities,
                 self.tick,
                 reef,
+                self.creature_color_mode,
                 &mut rng,
             ),
         }
@@ -421,11 +457,21 @@ impl App {
             .filter(|entity| entity.def == def_index)
             .count();
         let entity = match &self.mode {
-            RuntimeMode::Tank(tank) => {
-                spawn_tank_entity(&self.definitions, def_index, copy_index, tank, &mut rng)
-            }
+            RuntimeMode::Tank(tank) => spawn_tank_entity(
+                ColorSelection {
+                    definitions: &self.definitions,
+                    mode: self.creature_color_mode,
+                },
+                def_index,
+                copy_index,
+                tank,
+                &mut rng,
+            ),
             RuntimeMode::Reef(reef) => spawn_reef_entity(
-                &self.definitions,
+                ColorSelection {
+                    definitions: &self.definitions,
+                    mode: self.creature_color_mode,
+                },
                 def_index,
                 copy_index,
                 &reef.world,
@@ -476,6 +522,7 @@ fn tick_reef(
     entities: &mut [Entity],
     tick: u64,
     reef: &mut ReefState,
+    creature_color_mode: CreatureColorMode,
     rng: &mut ThreadRng,
 ) {
     if reef.last_area.height < reef.min_height {
@@ -493,7 +540,10 @@ fn tick_reef(
             }
 
             let replacement = spawn_reef_entity(
-                definitions,
+                ColorSelection {
+                    definitions,
+                    mode: creature_color_mode,
+                },
                 entity.def,
                 copy_index,
                 &reef.world,
@@ -763,14 +813,20 @@ enum SpawnMode {
     Edge,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct ColorSelection<'a> {
+    definitions: &'a [CreatureDef],
+    mode: CreatureColorMode,
+}
+
 fn spawn_tank_entity(
-    definitions: &[CreatureDef],
+    colors: ColorSelection<'_>,
     def_index: usize,
     copy_index: usize,
     tank: &TankState,
     rng: &mut ThreadRng,
 ) -> Entity {
-    let def = &definitions[def_index];
+    let def = &colors.definitions[def_index];
     let (dx, dy) = def.starting_velocity(rng);
     let (activity, activity_ticks) = def.initial_activity(rng);
     let variant = def.best_variant(dx, 0, def_index + copy_index);
@@ -806,7 +862,7 @@ fn spawn_tank_entity(
         dx,
         dy,
         phase: rng.random_range(0..8),
-        color: entity_color(definitions, def_index, copy_index, rng),
+        color: entity_color(colors, def_index, rng),
         respawn_at: None,
         pose_intent: PoseIntent::Lateral,
         lateral_dx: dx,
@@ -821,7 +877,7 @@ fn spawn_tank_entity(
 }
 
 fn spawn_reef_entity(
-    definitions: &[CreatureDef],
+    colors: ColorSelection<'_>,
     def_index: usize,
     copy_index: usize,
     world: &ReefWorld,
@@ -829,7 +885,7 @@ fn spawn_reef_entity(
     mode: SpawnMode,
     rng: &mut ThreadRng,
 ) -> Entity {
-    let def = &definitions[def_index];
+    let def = &colors.definitions[def_index];
     let (mut dx, dy) = def.starting_velocity(rng);
     if dx == 0 && !def.is_floor_bound() {
         dx = if rng.random_bool(0.5) { -1 } else { 1 };
@@ -885,7 +941,7 @@ fn spawn_reef_entity(
         dx,
         dy,
         phase: rng.random_range(0..8),
-        color: entity_color(definitions, def_index, copy_index, rng),
+        color: entity_color(colors, def_index, rng),
         respawn_at: None,
         pose_intent: PoseIntent::Lateral,
         lateral_dx: dx,
@@ -938,34 +994,152 @@ fn anchored_max(center: i32, size: i32, min: i32, max: i32) -> i32 {
     start + size.min(max.saturating_sub(min) + 1).max(1) - 1
 }
 
-fn entity_color(
-    definitions: &[CreatureDef],
-    def_index: usize,
-    copy_index: usize,
-    rng: &mut ThreadRng,
-) -> Color {
-    let def = &definitions[def_index];
+fn entity_color(colors: ColorSelection<'_>, def_index: usize, rng: &mut ThreadRng) -> Color {
+    let def = &colors.definitions[def_index];
     if !def.colors.is_empty() {
-        return def.colors[rng.random_range(0..def.colors.len())];
+        let encoded_colors = def
+            .colors
+            .iter()
+            .filter_map(|color| colors.mode.encode_kdl_color(*color))
+            .collect::<Vec<_>>();
+        if !encoded_colors.is_empty() {
+            return encoded_colors[rng.random_range(0..encoded_colors.len())];
+        }
     }
 
-    let colors = [
-        Color::LightCyan,
-        Color::LightBlue,
-        Color::LightGreen,
-        Color::LightYellow,
-        Color::LightMagenta,
-        Color::Cyan,
-        Color::Green,
-        Color::Yellow,
-        Color::White,
-    ];
-    let name_hash = def
-        .name
-        .bytes()
-        .fold(0usize, |hash, byte| hash.wrapping_add(byte as usize));
+    colors.mode.random_global_color(rng)
+}
 
-    colors[(def_index + copy_index + name_hash) % colors.len()]
+impl CreatureColorMode {
+    fn random_global_color(self, rng: &mut ThreadRng) -> Color {
+        match self {
+            Self::Ansi16 => ANSI_16_COLORS[rng.random_range(0..ANSI_16_COLORS.len())],
+            Self::Indexed256 => Color::Indexed(rng.random_range(0..=u8::MAX)),
+            Self::TrueColor => Color::Rgb(rng.random(), rng.random(), rng.random()),
+        }
+    }
+
+    fn encode_kdl_color(self, color: Color) -> Option<Color> {
+        match self {
+            Self::Ansi16 => ansi16_index(color).map(|index| ANSI_16_COLORS[index as usize]),
+            Self::Indexed256 => match color {
+                Color::Rgb(red, green, blue) => {
+                    Some(Color::Indexed(nearest_256_color_index(red, green, blue)))
+                }
+                Color::Indexed(index) => Some(Color::Indexed(index)),
+                _ => ansi16_index(color).map(Color::Indexed),
+            },
+            Self::TrueColor => match color {
+                Color::Rgb(red, green, blue) => Some(Color::Rgb(red, green, blue)),
+                Color::Indexed(index) => {
+                    let (red, green, blue) = indexed_color_rgb(index);
+                    Some(Color::Rgb(red, green, blue))
+                }
+                _ => ansi16_index(color).map(|index| {
+                    let (red, green, blue) = indexed_color_rgb(index);
+                    Color::Rgb(red, green, blue)
+                }),
+            },
+        }
+    }
+}
+
+const ANSI_16_COLORS: [Color; 16] = [
+    Color::Black,
+    Color::Red,
+    Color::Green,
+    Color::Yellow,
+    Color::Blue,
+    Color::Magenta,
+    Color::Cyan,
+    Color::Gray,
+    Color::DarkGray,
+    Color::LightRed,
+    Color::LightGreen,
+    Color::LightYellow,
+    Color::LightBlue,
+    Color::LightMagenta,
+    Color::LightCyan,
+    Color::White,
+];
+
+fn ansi16_index(color: Color) -> Option<u8> {
+    match color {
+        Color::Black => Some(0),
+        Color::Red => Some(1),
+        Color::Green => Some(2),
+        Color::Yellow => Some(3),
+        Color::Blue => Some(4),
+        Color::Magenta => Some(5),
+        Color::Cyan => Some(6),
+        Color::Gray => Some(7),
+        Color::DarkGray => Some(8),
+        Color::LightRed => Some(9),
+        Color::LightGreen => Some(10),
+        Color::LightYellow => Some(11),
+        Color::LightBlue => Some(12),
+        Color::LightMagenta => Some(13),
+        Color::LightCyan => Some(14),
+        Color::White => Some(15),
+        Color::Indexed(index) if index < 16 => Some(index),
+        _ => None,
+    }
+}
+
+fn nearest_256_color_index(red: u8, green: u8, blue: u8) -> u8 {
+    (0..=u8::MAX)
+        .min_by_key(|index| {
+            let (candidate_red, candidate_green, candidate_blue) = indexed_color_rgb(*index);
+            color_distance_squared(
+                (red, green, blue),
+                (candidate_red, candidate_green, candidate_blue),
+            )
+        })
+        .expect("the 256-color palette is non-empty")
+}
+
+fn color_distance_squared(a: (u8, u8, u8), b: (u8, u8, u8)) -> u32 {
+    let red = i32::from(a.0) - i32::from(b.0);
+    let green = i32::from(a.1) - i32::from(b.1);
+    let blue = i32::from(a.2) - i32::from(b.2);
+    (red * red + green * green + blue * blue) as u32
+}
+
+fn indexed_color_rgb(index: u8) -> (u8, u8, u8) {
+    const ANSI_RGB: [(u8, u8, u8); 16] = [
+        (0, 0, 0),
+        (128, 0, 0),
+        (0, 128, 0),
+        (128, 128, 0),
+        (0, 0, 128),
+        (128, 0, 128),
+        (0, 128, 128),
+        (192, 192, 192),
+        (128, 128, 128),
+        (255, 0, 0),
+        (0, 255, 0),
+        (255, 255, 0),
+        (0, 0, 255),
+        (255, 0, 255),
+        (0, 255, 255),
+        (255, 255, 255),
+    ];
+    const CUBE_LEVELS: [u8; 6] = [0, 95, 135, 175, 215, 255];
+
+    match index {
+        0..=15 => ANSI_RGB[index as usize],
+        16..=231 => {
+            let offset = index - 16;
+            let red = CUBE_LEVELS[(offset / 36) as usize];
+            let green = CUBE_LEVELS[((offset % 36) / 6) as usize];
+            let blue = CUBE_LEVELS[(offset % 6) as usize];
+            (red, green, blue)
+        }
+        232..=255 => {
+            let value = 8 + (index - 232) * 10;
+            (value, value, value)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1132,10 +1306,16 @@ mod tests {
     }
 
     #[test]
-    fn spawned_creatures_use_their_defined_colors() {
+    fn spawned_creatures_use_their_defined_colors_in_truecolor_mode() {
         let config = load_config("config.kdl".as_ref()).expect("config loads");
         let definitions = load_creatures("art/creatures".as_ref()).expect("creatures load");
-        let mut app = App::new(config, definitions, Rect::new(0, 0, 120, 40)).expect("app starts");
+        let mut app = App::new_with_color_mode(
+            config,
+            definitions,
+            Rect::new(0, 0, 120, 40),
+            CreatureColorMode::TrueColor,
+        )
+        .expect("app starts");
         let bertrand = app
             .definitions
             .iter()
@@ -1150,6 +1330,63 @@ mod tests {
             .expect("bertrand spawned");
 
         assert!(app.definitions[bertrand].colors.contains(&entity.color));
+    }
+
+    #[test]
+    fn custom_rgb_creature_colors_snap_to_256_color_mode() {
+        let definitions = load_creatures("art/creatures".as_ref()).expect("creatures load");
+        let bertrand = definitions
+            .iter()
+            .position(|definition| definition.name == "bertrand")
+            .expect("bertrand definition exists");
+        let mut rng = rand::rng();
+
+        let color = entity_color(
+            ColorSelection {
+                definitions: &definitions,
+                mode: CreatureColorMode::Indexed256,
+            },
+            bertrand,
+            &mut rng,
+        );
+
+        assert!(matches!(color, Color::Indexed(_)));
+    }
+
+    #[test]
+    fn color_modes_generate_requested_global_color_classes() {
+        let mut rng = rand::rng();
+
+        assert!(ANSI_16_COLORS.contains(&CreatureColorMode::Ansi16.random_global_color(&mut rng)));
+        assert!(matches!(
+            CreatureColorMode::Indexed256.random_global_color(&mut rng),
+            Color::Indexed(_)
+        ));
+        assert!(matches!(
+            CreatureColorMode::TrueColor.random_global_color(&mut rng),
+            Color::Rgb(_, _, _)
+        ));
+    }
+
+    #[test]
+    fn ansi16_mode_uses_global_pool_for_rgb_only_creature_colors() {
+        let definitions = load_creatures("art/creatures".as_ref()).expect("creatures load");
+        let bertrand = definitions
+            .iter()
+            .position(|definition| definition.name == "bertrand")
+            .expect("bertrand definition exists");
+        let mut rng = rand::rng();
+
+        let color = entity_color(
+            ColorSelection {
+                definitions: &definitions,
+                mode: CreatureColorMode::Ansi16,
+            },
+            bertrand,
+            &mut rng,
+        );
+
+        assert!(ANSI_16_COLORS.contains(&color));
     }
 
     #[test]

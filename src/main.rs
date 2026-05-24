@@ -5,19 +5,24 @@ mod kdl_parse;
 mod render;
 mod world;
 
-use std::io;
+use std::{env, io};
 
-use color_eyre::eyre::Result;
+use color_eyre::eyre::{Result, eyre};
 use crossterm::{
     event::{DisableMouseCapture, EnableMouseCapture},
     execute,
 };
 
-use crate::{app::App, config::Mode, creature::load_creatures};
+use crate::{
+    app::{App, CreatureColorMode},
+    config::Mode,
+    creature::load_creatures,
+};
 
 fn main() -> Result<()> {
     color_eyre::install()?;
 
+    let options = parse_cli_args(env::args().skip(1))?;
     let config = config::load_config("config.kdl".as_ref())?;
     let definitions = load_creatures("art/creatures".as_ref())?;
     let enable_mouse = matches!(config.mode, Mode::Reef);
@@ -34,7 +39,12 @@ fn main() -> Result<()> {
 
         let launch_size = terminal.size()?;
         let launch_area = ratatui::layout::Rect::new(0, 0, launch_size.width, launch_size.height);
-        let mut app = App::new(config, definitions, launch_area)?;
+        let mut app = App::new_with_color_mode(
+            config,
+            definitions,
+            launch_area,
+            options.creature_color_mode,
+        )?;
         app.run(&mut terminal)
     })();
 
@@ -52,13 +62,91 @@ fn main() -> Result<()> {
     result
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+struct CliOptions {
+    creature_color_mode: CreatureColorMode,
+}
+
+fn parse_cli_args<I, S>(args: I) -> Result<CliOptions>
+where
+    I: IntoIterator<Item = S>,
+    S: Into<String>,
+{
+    let mut options = CliOptions::default();
+    let mut args = args.into_iter().map(Into::into);
+
+    while let Some(arg) = args.next() {
+        if arg == "--colors" {
+            let value = args
+                .next()
+                .ok_or_else(|| eyre!("--colors requires a value: 16, 256, or true"))?;
+            options.creature_color_mode = parse_color_mode(&value)?;
+        } else if let Some(value) = arg.strip_prefix("--colors=") {
+            options.creature_color_mode = parse_color_mode(value)?;
+        } else {
+            return Err(eyre!("unsupported argument {arg:?}"));
+        }
+    }
+
+    Ok(options)
+}
+
+fn parse_color_mode(value: &str) -> Result<CreatureColorMode> {
+    match value {
+        "16" => Ok(CreatureColorMode::Ansi16),
+        "256" => Ok(CreatureColorMode::Indexed256),
+        "true" => Ok(CreatureColorMode::TrueColor),
+        _ => Err(eyre!(
+            "unsupported --colors value {value:?}; expected 16, 256, or true"
+        )),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::{fs, path::PathBuf, process::Command};
 
     use kdl::KdlDocument;
 
+    use super::*;
     use crate::kdl_parse::format_parse_error;
+
+    #[test]
+    fn colors_flag_defaults_to_256() {
+        assert_eq!(
+            parse_cli_args(std::iter::empty::<&str>())
+                .expect("empty args parse")
+                .creature_color_mode,
+            CreatureColorMode::Indexed256
+        );
+    }
+
+    #[test]
+    fn parses_colors_flag_values() {
+        assert_eq!(
+            parse_cli_args(["--colors", "16"])
+                .expect("16 colors parses")
+                .creature_color_mode,
+            CreatureColorMode::Ansi16
+        );
+        assert_eq!(
+            parse_cli_args(["--colors=256"])
+                .expect("256 colors parses")
+                .creature_color_mode,
+            CreatureColorMode::Indexed256
+        );
+        assert_eq!(
+            parse_cli_args(["--colors", "true"])
+                .expect("truecolor parses")
+                .creature_color_mode,
+            CreatureColorMode::TrueColor
+        );
+    }
+
+    #[test]
+    fn rejects_unsupported_colors_flag_values() {
+        assert!(parse_cli_args(["--colors", "8"]).is_err());
+    }
 
     #[test]
     fn all_repo_kdl_files_parse() {
