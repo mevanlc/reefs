@@ -1,3 +1,5 @@
+use std::collections::VecDeque;
+
 use ratatui::{
     Frame,
     buffer::Buffer,
@@ -397,6 +399,7 @@ fn render_creatures(
             entity.pose_intent,
             entity.animation_tick_for(def, entity.animation_frame_tick),
             entity.phase,
+            entity.art_variant,
         );
         let style = Style::new().fg(entity.color).add_modifier(if def.brownian {
             Modifier::BOLD
@@ -432,32 +435,99 @@ fn render_static_art(
     viewport_x: i32,
     style: Style,
 ) {
-    for (line_index, line) in variant.art.iter().enumerate() {
+    let transparent = transparent_space_mask(variant);
+    for (line_index, transparent_row) in
+        transparent.iter().enumerate().take(variant.height as usize)
+    {
         let y = area.y as i32 + entity.y + line_index as i32;
         if y < area.y as i32 || y >= area.bottom() as i32 {
             continue;
         }
 
-        let raw_x = area.x as i32 + entity.x - viewport_x;
-        if raw_x >= area.right() as i32 {
-            continue;
+        let line = variant
+            .art
+            .get(line_index)
+            .map(String::as_str)
+            .unwrap_or("");
+        for (local_x, is_transparent) in transparent_row
+            .iter()
+            .enumerate()
+            .take(variant.width as usize)
+        {
+            if *is_transparent {
+                continue;
+            }
+            let raw_x = area.x as i32 + entity.x - viewport_x + local_x as i32;
+            if raw_x < area.x as i32 || raw_x >= area.right() as i32 {
+                continue;
+            }
+            let symbol = line.chars().nth(local_x).unwrap_or(' ');
+            if let Some(cell) = buffer.cell_mut((raw_x as u16, y as u16)) {
+                let mut encoded = [0; 4];
+                cell.set_symbol(symbol.encode_utf8(&mut encoded))
+                    .set_style(style);
+            }
         }
-
-        let (x, text) = if raw_x < area.x as i32 {
-            let skip = (area.x as i32 - raw_x) as usize;
-            let clipped = line.chars().skip(skip).collect::<String>();
-            (area.x, clipped)
-        } else {
-            (raw_x as u16, line.clone())
-        };
-
-        if text.is_empty() || x >= area.right() {
-            continue;
-        }
-
-        let width = area.right().saturating_sub(x) as usize;
-        buffer.set_stringn(x, y as u16, text, width, style);
     }
+}
+
+fn transparent_space_mask(variant: &Variant) -> Vec<Vec<bool>> {
+    let width = variant.width as usize;
+    let height = variant.height as usize;
+    let mut transparent = vec![vec![false; width]; height];
+    if width == 0 || height == 0 {
+        return transparent;
+    }
+
+    let mut queue = VecDeque::new();
+    for x in 0..width {
+        enqueue_transparent_space(variant, &mut transparent, &mut queue, x, 0);
+        enqueue_transparent_space(variant, &mut transparent, &mut queue, x, height - 1);
+    }
+    for y in 0..height {
+        enqueue_transparent_space(variant, &mut transparent, &mut queue, 0, y);
+        enqueue_transparent_space(variant, &mut transparent, &mut queue, width - 1, y);
+    }
+
+    while let Some((x, y)) = queue.pop_front() {
+        if x > 0 {
+            enqueue_transparent_space(variant, &mut transparent, &mut queue, x - 1, y);
+        }
+        if x + 1 < width {
+            enqueue_transparent_space(variant, &mut transparent, &mut queue, x + 1, y);
+        }
+        if y > 0 {
+            enqueue_transparent_space(variant, &mut transparent, &mut queue, x, y - 1);
+        }
+        if y + 1 < height {
+            enqueue_transparent_space(variant, &mut transparent, &mut queue, x, y + 1);
+        }
+    }
+
+    transparent
+}
+
+fn enqueue_transparent_space(
+    variant: &Variant,
+    transparent: &mut [Vec<bool>],
+    queue: &mut VecDeque<(usize, usize)>,
+    x: usize,
+    y: usize,
+) {
+    if transparent[y][x] || variant_char_at(variant, x, y) != ' ' {
+        return;
+    }
+
+    transparent[y][x] = true;
+    queue.push_back((x, y));
+}
+
+fn variant_char_at(variant: &Variant, x: usize, y: usize) -> char {
+    variant
+        .art
+        .get(y)
+        .and_then(|line| line.chars().nth(x))
+        .unwrap_or(' ')
 }
 
 fn render_school(
@@ -615,8 +685,126 @@ mod tests {
     use crate::{
         app::{App, SpawnModal},
         config::load_config,
-        creature::load_creatures,
+        creature::{ActivityState, PoseIntent, load_creatures},
     };
+
+    #[test]
+    fn static_art_edge_connected_spaces_are_transparent() {
+        let area = Rect::new(0, 0, 8, 1);
+        let mut buffer = Buffer::empty(area);
+        for x in 0..area.width {
+            buffer
+                .cell_mut((x, 0))
+                .expect("cell exists")
+                .set_symbol(".");
+        }
+        let entity = Entity {
+            def: 0,
+            x: 1,
+            y: 0,
+            dx: 1,
+            dy: 0,
+            animation_frame_tick: 0,
+            phase: 0,
+            art_variant: 0,
+            color: Color::White,
+            respawn_at: None,
+            pose_intent: PoseIntent::Lateral,
+            lateral_dx: 1,
+            depth_swim_ticks: 0,
+            school_rearrangements: 0,
+            activity: ActivityState::Active,
+            activity_ticks: 1,
+            idle_move_chance: crate::creature::DEFAULT_IDLE_MOVE_CHANCE,
+            idle_turn_chance: crate::creature::DEFAULT_IDLE_TURN_CHANCE,
+            territory: None,
+        };
+        let variant = Variant {
+            pose: "right".to_string(),
+            art_variant: 0,
+            art: vec!["  A B ".to_string()],
+            width: 6,
+            height: 1,
+            school: None,
+        };
+
+        render_static_art(
+            &mut buffer,
+            area,
+            &entity,
+            &variant,
+            0,
+            Style::new().fg(Color::White),
+        );
+
+        let rendered = (0..area.width)
+            .filter_map(|x| buffer.cell((x, 0)))
+            .map(|cell| cell.symbol())
+            .collect::<String>();
+        assert_eq!(rendered, "...A.B..");
+    }
+
+    #[test]
+    fn static_art_enclosed_spaces_remain_opaque() {
+        let area = Rect::new(0, 0, 3, 3);
+        let mut buffer = Buffer::empty(area);
+        for y in 0..area.height {
+            for x in 0..area.width {
+                buffer
+                    .cell_mut((x, y))
+                    .expect("cell exists")
+                    .set_symbol(".");
+            }
+        }
+        let entity = Entity {
+            def: 0,
+            x: 0,
+            y: 0,
+            dx: 1,
+            dy: 0,
+            animation_frame_tick: 0,
+            phase: 0,
+            art_variant: 0,
+            color: Color::White,
+            respawn_at: None,
+            pose_intent: PoseIntent::Lateral,
+            lateral_dx: 1,
+            depth_swim_ticks: 0,
+            school_rearrangements: 0,
+            activity: ActivityState::Active,
+            activity_ticks: 1,
+            idle_move_chance: crate::creature::DEFAULT_IDLE_MOVE_CHANCE,
+            idle_turn_chance: crate::creature::DEFAULT_IDLE_TURN_CHANCE,
+            territory: None,
+        };
+        let variant = Variant {
+            pose: "right".to_string(),
+            art_variant: 0,
+            art: vec!["XXX".to_string(), "X X".to_string(), "XXX".to_string()],
+            width: 3,
+            height: 3,
+            school: None,
+        };
+
+        render_static_art(
+            &mut buffer,
+            area,
+            &entity,
+            &variant,
+            0,
+            Style::new().fg(Color::White),
+        );
+
+        let rendered = (0..area.height)
+            .map(|y| {
+                (0..area.width)
+                    .filter_map(|x| buffer.cell((x, y)))
+                    .map(|cell| cell.symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(rendered, vec!["XXX", "X X", "XXX"]);
+    }
 
     #[test]
     fn reef_surface_renders_help_hint_overlay() {

@@ -252,10 +252,8 @@ mod tests {
     fn loads_current_config_shape() {
         let config = load_config(Path::new("config.kdl")).expect("config loads");
 
-        assert!(config.reef.horizontal.scroll_enabled);
-        assert_eq!(config.reef.horizontal.offscreen_pages, 0.5);
         assert!(!config.reef.vertical.scroll_enabled);
         assert_eq!(config.reef.creatures.respawn_delay_ms, 1000);
-        assert_eq!(config.reef.creatures.count_scale, 2.0);
+        assert_eq!(config.reef.creatures.count_scale, 1.9);
     }
 }

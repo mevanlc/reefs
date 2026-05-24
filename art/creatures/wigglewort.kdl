@@ -4,7 +4,7 @@ title "a seafloor plant"
 description "a wiggly stalk anchored to the seafloor, swaying between two poses"
 sauce author=mevanlc date=20260512 license=CCBYSA4.0
 
-count 8
+count 14
 
 animation hold-chance=0.15
 
@@ -15,7 +15,7 @@ spawn-location floor
 
 (v1)face ###"""
 (
- )  
+ )
 (   )
  ) (
 (   )
@@ -24,7 +24,7 @@ spawn-location floor
 
 (v1)face1 ###"""
  )
-(  
+(
  )   )
 (   (
  )  )

@@ -24,6 +24,8 @@ const TICK_RATE_STEP: Duration = Duration::from_millis(20);
 const SCROLL_STEP: i32 = 4;
 const MIN_SPAWN_DEPTH_JITTER: f64 = 0.12;
 const MAX_SPAWN_DEPTH_JITTER: f64 = 0.35;
+const MIN_SCENE_CRUISER_RESPAWN_DELAY_MS: u64 = 12_000;
+const MAX_SCENE_CRUISER_RESPAWN_DELAY_MS: u64 = 36_000;
 
 pub struct App {
     pub(crate) definitions: Vec<CreatureDef>,
@@ -208,10 +210,16 @@ impl App {
 
     fn spawn_initial_entities(&mut self, count_scale: f64) {
         let mut rng = rand::rng();
+        let mut active_counts = vec![0; self.definitions.len()];
 
-        for def_index in 0..self.definitions.len() {
-            let count = scaled_initial_count(self.definitions[def_index].count, count_scale);
+        for (def_index, active_count) in active_counts.iter_mut().enumerate() {
+            let def = &self.definitions[def_index];
+            let count = scaled_initial_count(def.count, count_scale);
             for copy_index in 0..count {
+                if scene_cruiser_at_count_max(def, *active_count) {
+                    break;
+                }
+
                 let entity = spawn_reef_entity(
                     ColorSelection {
                         definitions: &self.definitions,
@@ -225,6 +233,7 @@ impl App {
                     &mut rng,
                 );
                 self.entities.push(entity);
+                *active_count += 1;
             }
         }
     }
@@ -451,6 +460,21 @@ fn scaled_initial_count(count: usize, scale: f64) -> usize {
     }
 }
 
+fn active_entity_counts(definition_count: usize, entities: &[Entity]) -> Vec<usize> {
+    let mut counts = vec![0; definition_count];
+    for entity in entities.iter().filter(|entity| entity.is_active()) {
+        if let Some(count) = counts.get_mut(entity.def) {
+            *count += 1;
+        }
+    }
+    counts
+}
+
+fn scene_cruiser_at_count_max(def: &CreatureDef, active_count: usize) -> bool {
+    def.scene_cruiser_count_max()
+        .is_some_and(|count_max| active_count >= count_max)
+}
+
 fn tick_reef(
     definitions: &[CreatureDef],
     entities: &mut [Entity],
@@ -466,10 +490,15 @@ fn tick_reef(
     let now = Instant::now();
     let bounds = reef.world.simulated_bounds(reef.last_area.width);
     let band = WaterBand::for_reef(&reef.world, reef.last_area.height);
+    let mut active_counts = active_entity_counts(definitions.len(), entities);
 
     for (copy_index, entity) in entities.iter_mut().enumerate() {
         if let Some(respawn_at) = entity.respawn_at {
             if now < respawn_at {
+                continue;
+            }
+
+            if scene_cruiser_at_count_max(&definitions[entity.def], active_counts[entity.def]) {
                 continue;
             }
 
@@ -491,6 +520,7 @@ fn tick_reef(
             entity.dy = replacement.dy;
             entity.animation_frame_tick = replacement.animation_frame_tick;
             entity.phase = replacement.phase;
+            entity.art_variant = replacement.art_variant;
             entity.pose_intent = replacement.pose_intent;
             entity.lateral_dx = replacement.lateral_dx;
             entity.depth_swim_ticks = replacement.depth_swim_ticks;
@@ -501,6 +531,7 @@ fn tick_reef(
             entity.idle_turn_chance = replacement.idle_turn_chance;
             entity.territory = replacement.territory;
             entity.respawn_at = None;
+            active_counts[entity.def] += 1;
             continue;
         }
 
@@ -513,6 +544,7 @@ fn tick_reef(
                 PoseIntent::Lateral,
                 entity.animation_tick_for(def, entity.animation_frame_tick),
                 entity.phase,
+                entity.art_variant,
             );
             entity.dx = 0;
             entity.dy = 0;
@@ -527,6 +559,7 @@ fn tick_reef(
             entity.pose_intent,
             entity.animation_tick_for(def, entity.animation_frame_tick),
             entity.phase,
+            entity.art_variant,
         );
         update_reef_motion(def, entity, &band, motion_variant, tick, rng);
 
@@ -538,6 +571,7 @@ fn tick_reef(
             entity.pose_intent,
             entity.animation_tick_for(def, entity.animation_frame_tick),
             entity.phase,
+            entity.art_variant,
         );
         if let Some(clamped_y) = band.clamp_y_for(entity.y, variant)
             && clamped_y != entity.y
@@ -555,8 +589,20 @@ fn tick_reef(
         }
 
         if entity_exited(entity, variant, bounds) {
-            entity.mark_exited(reef.respawn_delay, now);
+            entity.mark_exited(respawn_delay_for(def, reef, rng), now);
         }
+    }
+}
+
+fn respawn_delay_for(def: &CreatureDef, reef: &ReefState, rng: &mut ThreadRng) -> Duration {
+    if def.is_scene_cruiser() {
+        Duration::from_millis(
+            rng.random_range(
+                MIN_SCENE_CRUISER_RESPAWN_DELAY_MS..=MAX_SCENE_CRUISER_RESPAWN_DELAY_MS,
+            ),
+        )
+    } else {
+        reef.respawn_delay
     }
 }
 
@@ -571,14 +617,20 @@ fn update_reef_motion(
     let was_idle = entity.activity == ActivityState::Idle;
     entity.advance_activity(def, rng);
     if entity.activity == ActivityState::Idle {
-        entity.update_idle_motion(tick, rng);
+        if def.is_scene_cruiser() {
+            entity.update_no_turn_idle_motion(tick, rng);
+        } else {
+            entity.update_idle_motion(tick, rng);
+        }
         return;
     }
     if was_idle && entity.dx == 0 {
         entity.resume_lateral_motion();
     }
 
-    if def.four_way_swimmer {
+    if def.is_scene_cruiser() {
+        update_scene_cruiser_motion(entity, rng);
+    } else if def.four_way_swimmer {
         update_four_way_swim(entity, rng);
     } else if def.brownian && rng.random_bool(0.25) {
         entity.dx = rng.random_range(-1..=1);
@@ -590,7 +642,21 @@ fn update_reef_motion(
     }
 
     apply_depth_bias(def, entity, band, variant, rng);
-    apply_territory_bias(def, entity, rng);
+    if !def.is_scene_cruiser() {
+        apply_territory_bias(def, entity, rng);
+    }
+}
+
+fn update_scene_cruiser_motion(entity: &mut Entity, rng: &mut ThreadRng) {
+    if entity.lateral_dx == 0 {
+        entity.lateral_dx = if entity.dx < 0 { -1 } else { 1 };
+    }
+
+    entity.dx = entity.lateral_dx.signum();
+    entity.pose_intent = PoseIntent::Lateral;
+    if rng.random_bool(crate::creature::default_movement_transition_chance()) {
+        entity.toggle_vertical_motion(rng);
+    }
 }
 
 fn apply_depth_bias(
@@ -772,6 +838,7 @@ fn rebind_creatures_to_reef(
             entity.pose_intent,
             entity.animation_tick_for(def, entity.animation_frame_tick),
             entity.phase,
+            entity.art_variant,
         );
         if def.is_floor_bound() {
             if let Some(y) = band.floor_y_for(variant) {
@@ -788,7 +855,7 @@ fn rebind_creatures_to_reef(
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SpawnMode {
     Anywhere,
     Edge,
@@ -815,21 +882,25 @@ fn spawn_reef_entity(
         dx = if rng.random_bool(0.5) { -1 } else { 1 };
     }
 
-    let variant = def.best_variant(dx, 0, def_index + copy_index);
     let bounds = reef.world.simulated_bounds(reef.last_area.width);
+    let edge_spawn = mode == SpawnMode::Edge || def.is_scene_cruiser();
+    if edge_spawn {
+        dx = if rng.random_bool(0.5) {
+            dx.abs().max(1)
+        } else {
+            -dx.abs().max(1)
+        };
+    }
+    let art_variant = def.random_art_variant(rng);
+    let variant = def.best_variant(dx, 0, def_index + copy_index, art_variant);
     let max_x = bounds
         .end
         .saturating_sub(variant.width as i32)
         .max(bounds.start);
-    let (x, dx) = match mode {
-        SpawnMode::Anywhere => (rng.random_range(bounds.start..=max_x), dx),
-        SpawnMode::Edge => {
-            if rng.random_bool(0.5) {
-                (bounds.start, dx.abs().max(1))
-            } else {
-                (max_x, -dx.abs().max(1))
-            }
-        }
+    let x = if edge_spawn {
+        if dx > 0 { bounds.start } else { max_x }
+    } else {
+        rng.random_range(bounds.start..=max_x)
     };
 
     let band = WaterBand::for_reef(&reef.world, reef.last_area.height);
@@ -866,6 +937,7 @@ fn spawn_reef_entity(
         dy,
         animation_frame_tick,
         phase: rng.random_range(0..8),
+        art_variant,
         color: entity_color(colors, def_index, rng),
         respawn_at: None,
         pose_intent: PoseIntent::Lateral,
@@ -1094,6 +1166,7 @@ mod tests {
     fn water_band_rejects_creatures_that_overlap_floor() {
         let variant = Variant {
             pose: "face".to_string(),
+            art_variant: 0,
             art: vec!["xx".to_string(), "xx".to_string()],
             width: 2,
             height: 2,
@@ -1127,9 +1200,132 @@ mod tests {
     }
 
     #[test]
+    fn scene_cruisers_spawn_from_far_edge_toward_opposite_side() {
+        let config = load_config("config.kdl".as_ref()).expect("config loads");
+        let definitions = load_creatures("art/creatures".as_ref()).expect("creatures load");
+        let app = App::new(config, definitions, Rect::new(0, 0, 120, 40)).expect("app starts");
+        let def_index = scene_cruiser_definition(&app);
+        let mut rng = rand::rng();
+
+        let entity = spawn_reef_entity(
+            ColorSelection {
+                definitions: &app.definitions,
+                mode: app.creature_color_mode,
+            },
+            def_index,
+            0,
+            &app.reef,
+            SpawnMode::Anywhere,
+            app.tick,
+            &mut rng,
+        );
+        let variant =
+            app.definitions[def_index].best_variant(entity.dx, 0, def_index, entity.art_variant);
+        let bounds = app.reef.world.simulated_bounds(app.reef.last_area.width);
+        let max_x = bounds
+            .end
+            .saturating_sub(variant.width as i32)
+            .max(bounds.start);
+
+        assert_ne!(entity.dx, 0);
+        assert_eq!(entity.lateral_dx, entity.dx.signum());
+        if entity.dx > 0 {
+            assert_eq!(entity.x, bounds.start);
+        } else {
+            assert_eq!(entity.x, max_x);
+        }
+    }
+
+    #[test]
+    fn scene_cruisers_do_not_reverse_while_idle() {
+        let config = load_config("config.kdl".as_ref()).expect("config loads");
+        let definitions = load_creatures("art/creatures".as_ref()).expect("creatures load");
+        let app = App::new(config, definitions, Rect::new(0, 0, 120, 40)).expect("app starts");
+        let def_index = scene_cruiser_definition(&app);
+        let def = &app.definitions[def_index];
+        let variant = def.best_variant(1, 0, def_index, 0);
+        let band = WaterBand::for_reef(&app.reef.world, app.reef.last_area.height);
+        let mut rng = rand::rng();
+        let mut entity = spawn_reef_entity(
+            ColorSelection {
+                definitions: &app.definitions,
+                mode: app.creature_color_mode,
+            },
+            def_index,
+            0,
+            &app.reef,
+            SpawnMode::Anywhere,
+            app.tick,
+            &mut rng,
+        );
+        entity.activity = ActivityState::Idle;
+        entity.activity_ticks = 10;
+        entity.dx = 0;
+        entity.lateral_dx = 1;
+        entity.idle_move_chance = 1.0;
+        entity.idle_turn_chance = 1.0;
+
+        update_reef_motion(
+            def,
+            &mut entity,
+            &band,
+            variant,
+            crate::creature::IDLE_ACTION_INTERVAL,
+            &mut rng,
+        );
+
+        assert_eq!(entity.dx, 1);
+        assert_eq!(entity.lateral_dx, 1);
+        assert_eq!(entity.pose_dx_for(def), 1);
+    }
+
+    #[test]
+    fn scene_cruisers_use_infrequent_respawn_delay() {
+        let config = load_config("config.kdl".as_ref()).expect("config loads");
+        let definitions = load_creatures("art/creatures".as_ref()).expect("creatures load");
+        let app = App::new(config, definitions, Rect::new(0, 0, 120, 40)).expect("app starts");
+        let def_index = scene_cruiser_definition(&app);
+        let mut rng = rand::rng();
+
+        let delay = respawn_delay_for(&app.definitions[def_index], &app.reef, &mut rng);
+
+        assert!(delay >= Duration::from_millis(MIN_SCENE_CRUISER_RESPAWN_DELAY_MS));
+        assert!(delay <= Duration::from_millis(MAX_SCENE_CRUISER_RESPAWN_DELAY_MS));
+        assert!(delay > app.reef.respawn_delay);
+    }
+
+    #[test]
+    fn scene_cruiser_count_max_limits_natural_spawns() {
+        let config = load_config("config.kdl".as_ref()).expect("config loads");
+        let definitions = load_creatures("art/creatures".as_ref()).expect("creatures load");
+        let mut app = App::new(config, definitions, Rect::new(0, 0, 120, 40)).expect("app starts");
+        let def_index = scene_cruiser_definition(&app);
+
+        assert_eq!(
+            app.definitions[def_index].scene_cruiser_count_max(),
+            Some(1)
+        );
+        assert_eq!(active_count(&app, def_index), 1);
+
+        app.spawn_creature(def_index);
+        let inactive_index = app
+            .entities
+            .iter()
+            .position(|entity| entity.def == def_index && entity.is_active())
+            .expect("scene cruiser entity exists");
+        app.entities[inactive_index].respawn_at = Some(Instant::now() - Duration::from_secs(1));
+
+        app.tick();
+
+        assert_eq!(active_count(&app, def_index), 1);
+        assert_eq!(inactive_count(&app, def_index), 1);
+    }
+
+    #[test]
     fn entity_exits_only_at_offscreen_bounds() {
         let variant = Variant {
             pose: "face".to_string(),
+            art_variant: 0,
             art: vec!["xx".to_string()],
             width: 2,
             height: 1,
@@ -1147,6 +1343,7 @@ mod tests {
             dy: 0,
             animation_frame_tick: 0,
             phase: 0,
+            art_variant: 0,
             color: Color::White,
             respawn_at: None,
             pose_intent: PoseIntent::Lateral,
@@ -1180,6 +1377,7 @@ mod tests {
             dy: 0,
             animation_frame_tick: 0,
             phase: 0,
+            art_variant: 0,
             color: Color::White,
             respawn_at: None,
             pose_intent: PoseIntent::FaceAway,
@@ -1216,12 +1414,12 @@ mod tests {
             .iter()
             .position(|definition| definition.name == "wigglewort")
             .expect("wigglewort definition exists");
-        let variant = app.definitions[def_index].best_variant(0, 0, 0);
-        let expected_y = WaterBand::for_reef(&app.reef.world, app.reef.last_area.height)
-            .floor_y_for(variant)
-            .expect("floor y fits");
+        let band = WaterBand::for_reef(&app.reef.world, app.reef.last_area.height);
 
         for entity in app.entities.iter().filter(|entity| entity.def == def_index) {
+            let variant =
+                app.definitions[def_index].best_variant(0, 0, entity.phase, entity.art_variant);
+            let expected_y = band.floor_y_for(variant).expect("floor y fits");
             assert_eq!(entity.dx, 0);
             assert_eq!(entity.dy, 0);
             assert_eq!(entity.y, expected_y);
@@ -1230,6 +1428,14 @@ mod tests {
         app.tick();
 
         for entity in app.entities.iter().filter(|entity| entity.def == def_index) {
+            let variant = app.definitions[def_index].best_variant_for(
+                0,
+                PoseIntent::Lateral,
+                entity.animation_tick_for(&app.definitions[def_index], entity.animation_frame_tick),
+                entity.phase,
+                entity.art_variant,
+            );
+            let expected_y = band.floor_y_for(variant).expect("floor y fits");
             assert_eq!(entity.dx, 0);
             assert_eq!(entity.dy, 0);
             assert_eq!(entity.y, expected_y);
@@ -1340,7 +1546,11 @@ mod tests {
         let expected = definitions
             .iter()
             .map(|definition| {
-                scaled_initial_count(definition.count, config.reef.creatures.count_scale)
+                let count =
+                    scaled_initial_count(definition.count, config.reef.creatures.count_scale);
+                definition
+                    .scene_cruiser_count_max()
+                    .map_or(count, |count_max| count.min(count_max))
             })
             .sum::<usize>();
         let app = App::new(config, definitions, Rect::new(0, 0, 120, 40)).expect("app starts");
@@ -1544,7 +1754,12 @@ mod tests {
         assert_eq!(app.entities.len(), initial_entities);
 
         app.handle_key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
-        assert_eq!(reef_viewport_x(&app), initial_viewport_x + SCROLL_STEP);
+        let expected_viewport_x = if app.reef.scroll_enabled {
+            initial_viewport_x + SCROLL_STEP
+        } else {
+            initial_viewport_x
+        };
+        assert_eq!(reef_viewport_x(&app), expected_viewport_x);
 
         app.handle_key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
         assert_eq!(reef_viewport_x(&app), initial_viewport_x);
@@ -1616,6 +1831,27 @@ mod tests {
             .iter()
             .position(|definition| definition.count == 0)
             .expect("at least one count=0 creature definition exists")
+    }
+
+    fn scene_cruiser_definition(app: &App) -> usize {
+        app.definitions
+            .iter()
+            .position(|definition| definition.is_scene_cruiser())
+            .expect("at least one scene-cruiser definition exists")
+    }
+
+    fn active_count(app: &App, def_index: usize) -> usize {
+        app.entities
+            .iter()
+            .filter(|entity| entity.def == def_index && entity.is_active())
+            .count()
+    }
+
+    fn inactive_count(app: &App, def_index: usize) -> usize {
+        app.entities
+            .iter()
+            .filter(|entity| entity.def == def_index && !entity.is_active())
+            .count()
     }
 
     fn reef_viewport_x(app: &App) -> i32 {

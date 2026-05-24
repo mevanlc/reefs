@@ -3,10 +3,10 @@ title "a large sea turtle"
 description "broad hexagonal-patterned shell, small round eye, and trailing rear flippers"
 sauce author=mevanlc date=20260503 license=CCBYSA4.0
 
-count 0
+count 1
 
 constraints {
-    scene-cruiser
+    scene-cruiser count-max=1
 }
 
 left ###"""
@@ -33,4 +33,3 @@ right ###"""
                 /../
               /,,/
 """###
-

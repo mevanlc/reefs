@@ -25,6 +25,7 @@ pub struct CreatureDef {
     pub constraints: CreatureConstraints,
     pub preferences: CreaturePreferences,
     pub variants: Vec<Variant>,
+    art_variant_count: usize,
     pub count: usize,
     pub four_way_swimmer: bool,
     pub spawn_location: SpawnLocation,
@@ -38,8 +39,8 @@ pub struct CreatureDef {
 }
 
 impl CreatureDef {
-    pub fn best_variant(&self, dx: i16, tick: u64, phase: usize) -> &Variant {
-        self.best_variant_for(dx, PoseIntent::Lateral, tick, phase)
+    pub fn best_variant(&self, dx: i16, tick: u64, phase: usize, art_variant: usize) -> &Variant {
+        self.best_variant_for(dx, PoseIntent::Lateral, tick, phase, art_variant)
     }
 
     pub fn best_variant_for(
@@ -48,25 +49,49 @@ impl CreatureDef {
         pose_intent: PoseIntent,
         tick: u64,
         phase: usize,
+        art_variant: usize,
     ) -> &Variant {
         for wanted in self.pose_preferences(dx, pose_intent) {
             let matching = self
                 .variants
                 .iter()
-                .filter(|variant| pose_matches(&variant.pose, wanted))
+                .filter(|variant| {
+                    pose_matches(&variant.pose, wanted)
+                        && variant_matches_art_variant(variant, art_variant)
+                })
                 .collect::<Vec<_>>();
             if !matching.is_empty() {
                 return matching[(tick as usize / 3 + phase) % matching.len()];
+            }
+
+            let fallback_matching = self
+                .variants
+                .iter()
+                .filter(|variant| pose_matches(&variant.pose, wanted))
+                .collect::<Vec<_>>();
+            if !fallback_matching.is_empty() {
+                return fallback_matching[(tick as usize / 3 + phase) % fallback_matching.len()];
             }
         }
 
         let face = self
             .variants
             .iter()
-            .filter(|variant| variant.pose.starts_with("face"))
+            .filter(|variant| {
+                variant.pose.starts_with("face")
+                    && variant_matches_art_variant(variant, art_variant)
+            })
             .collect::<Vec<_>>();
         if !face.is_empty() {
             return face[(tick as usize / 3 + phase) % face.len()];
+        }
+        let art_variant_variants = self
+            .variants
+            .iter()
+            .filter(|variant| variant_matches_art_variant(variant, art_variant))
+            .collect::<Vec<_>>();
+        if !art_variant_variants.is_empty() {
+            return art_variant_variants[(tick as usize / 3 + phase) % art_variant_variants.len()];
         }
         &self.variants[(tick as usize / 3 + phase) % self.variants.len()]
     }
@@ -97,6 +122,10 @@ impl CreatureDef {
 
     pub fn has_motion_drag_poses(&self) -> bool {
         self.has_pose("left-drag") || self.has_pose("right-drag")
+    }
+
+    pub fn random_art_variant(&self, rng: &mut ThreadRng) -> usize {
+        rng.random_range(0..self.art_variant_count.max(1))
     }
 
     fn has_pose(&self, pose: &str) -> bool {
@@ -170,6 +199,17 @@ impl CreatureDef {
         self.constraints.sessile.is_some()
     }
 
+    pub fn is_scene_cruiser(&self) -> bool {
+        self.constraints.scene_cruiser.is_some()
+    }
+
+    pub fn scene_cruiser_count_max(&self) -> Option<usize> {
+        self.constraints
+            .scene_cruiser
+            .as_ref()
+            .and_then(|scene_cruiser| scene_cruiser.count_max)
+    }
+
     pub fn initial_activity(&self, rng: &mut ThreadRng) -> (ActivityState, u16) {
         let idle_chance = (self.preferences.sedentary * 0.65
             + self.preferences.planktonic * 0.2
@@ -241,6 +281,7 @@ fn lerp_u16(min: u16, max: u16, t: f64) -> u16 {
 #[derive(Debug, Clone)]
 pub struct Variant {
     pub pose: String,
+    pub art_variant: usize,
     pub art: Vec<String>,
     pub width: u16,
     pub height: u16,
@@ -303,8 +344,14 @@ impl Kindom {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct CreatureConstraints {
     pub sessile: Option<SessileConstraint>,
+    pub scene_cruiser: Option<SceneCruiserConstraint>,
     pub walker: bool,
     pub obligate_airbreather: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SceneCruiserConstraint {
+    pub count_max: Option<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -387,7 +434,13 @@ impl DimensionSpec {
 }
 
 impl Variant {
-    fn from_kdl_node(pose: String, art: &str, unit: Option<&str>, unit_brownian: bool) -> Self {
+    fn from_kdl_node(
+        pose: String,
+        art_variant: usize,
+        art: &str,
+        unit: Option<&str>,
+        unit_brownian: bool,
+    ) -> Self {
         let art = art
             .trim_matches('\n')
             .lines()
@@ -403,6 +456,7 @@ impl Variant {
 
         Self {
             pose,
+            art_variant,
             school: unit
                 .filter(|unit| unit_brownian && !unit.is_empty())
                 .map(|unit| School::from_art(unit, &art)),
@@ -447,6 +501,7 @@ pub struct Entity {
     pub dy: i16,
     pub animation_frame_tick: u64,
     pub phase: usize,
+    pub art_variant: usize,
     pub color: Color,
     pub respawn_at: Option<Instant>,
     pub pose_intent: PoseIntent,
@@ -510,7 +565,10 @@ impl Entity {
     pub fn pose_dx_for(&self, def: &CreatureDef) -> i16 {
         if self.dx != 0 {
             self.dx
-        } else if self.activity == ActivityState::Idle && def.has_motion_drag_poses() {
+        } else if self.activity == ActivityState::Idle
+            && def.has_motion_drag_poses()
+            && !def.is_scene_cruiser()
+        {
             0
         } else {
             self.pose_dx()
@@ -556,6 +614,28 @@ impl Entity {
             self.idle_turn_chance = (self.idle_turn_chance + IDLE_CHANCE_STEP).min(1.0);
         } else {
             self.dx = 0;
+        }
+    }
+
+    pub fn update_no_turn_idle_motion(&mut self, tick: u64, rng: &mut ThreadRng) {
+        self.dy = 0;
+        self.pose_intent = PoseIntent::Lateral;
+
+        if self.lateral_dx == 0 {
+            self.lateral_dx = if self.dx < 0 { -1 } else { 1 };
+        }
+
+        if !tick.is_multiple_of(IDLE_ACTION_INTERVAL) {
+            self.dx = 0;
+            return;
+        }
+
+        if rng.random_bool(self.idle_move_chance.clamp(0.0, 1.0)) {
+            self.dx = self.facing_dx();
+            self.idle_move_chance = (self.idle_move_chance - IDLE_CHANCE_STEP).max(0.0);
+        } else {
+            self.dx = 0;
+            self.idle_move_chance = (self.idle_move_chance + IDLE_CHANCE_STEP).min(1.0);
         }
     }
 
@@ -806,6 +886,8 @@ fn load_creature_with_defaults(path: &Path, defaults: &KindomDefaults) -> Result
         && template.h_velocity.is_none()
         && template.v_velocity.is_none()
         && spawn_location == SpawnLocation::Water;
+    let mut art_variant_indices = HashMap::new();
+    let mut art_variant_count = 0;
     let variants = doc
         .nodes()
         .iter()
@@ -814,10 +896,19 @@ fn load_creature_with_defaults(path: &Path, defaults: &KindomDefaults) -> Result
             if !is_pose_node(pose) {
                 return None;
             }
+            let art_variant_key = node.ty().map(|ty| ty.value()).unwrap_or("");
+            let next_index = art_variant_count;
+            let art_variant = *art_variant_indices
+                .entry(art_variant_key.to_string())
+                .or_insert_with(|| {
+                    art_variant_count += 1;
+                    next_index
+                });
             let art = node.get(0)?.as_string()?;
             let unit = node.get("unit").and_then(KdlValue::as_string);
             Some(Variant::from_kdl_node(
                 pose.to_string(),
+                art_variant,
                 art,
                 unit,
                 unit_brownian,
@@ -839,6 +930,7 @@ fn load_creature_with_defaults(path: &Path, defaults: &KindomDefaults) -> Result
         constraints: template.constraints,
         preferences: template.preferences,
         variants,
+        art_variant_count,
         count,
         four_way_swimmer,
         spawn_location,
@@ -871,6 +963,10 @@ fn has_pose(variants: &[Variant], pose: &str) -> bool {
     variants
         .iter()
         .any(|variant| pose_matches(&variant.pose, pose))
+}
+
+fn variant_matches_art_variant(variant: &Variant, art_variant: usize) -> bool {
+    variant.art_variant == art_variant
 }
 
 fn pose_matches(pose: &str, wanted: &str) -> bool {
@@ -1004,6 +1100,11 @@ fn parse_constraints(node: &KdlNode, path: &Path) -> Result<CreatureConstraints>
                 constraints.sessile = Some(SessileConstraint {
                     attach: required_string_prop(child, "attach", path)?.to_string(),
                     to: required_string_prop(child, "to", path)?.to_string(),
+                });
+            }
+            "scene-cruiser" => {
+                constraints.scene_cruiser = Some(SceneCruiserConstraint {
+                    count_max: optional_usize_prop(child, "count-max", path)?,
                 });
             }
             "walker" => constraints.walker = true,
@@ -1198,6 +1299,28 @@ fn required_u16_prop(node: &KdlNode, name: &str, path: &Path) -> Result<u16> {
             )
         })?;
     checked_u16(value, name, path)
+}
+
+fn optional_usize_prop(node: &KdlNode, name: &str, path: &Path) -> Result<Option<usize>> {
+    let Some(value) = node.get(name) else {
+        return Ok(None);
+    };
+    let Some(value) = value.as_integer() else {
+        return Err(eyre!(
+            "{} `{}` property `{name}` must be a non-negative integer",
+            path.display(),
+            node.name().value()
+        ));
+    };
+
+    value.try_into().map(Some).map_err(|_| {
+        eyre!(
+            "{} `{}` property `{name}` must be a non-negative integer no larger than {}",
+            path.display(),
+            node.name().value(),
+            usize::MAX
+        )
+    })
 }
 
 fn checked_u16(value: i128, name: &str, path: &Path) -> Result<u16> {
@@ -1427,6 +1550,85 @@ face ###"""
     }
 
     #[test]
+    fn parses_scene_cruiser_constraint() {
+        let path = write_test_creature(
+            "scene-cruiser",
+            r####"
+name "scene-cruiser"
+
+constraints {
+    scene-cruiser count-max=3
+}
+
+left ###"""
+<
+"""###
+
+right ###"""
+>
+"""###
+"####,
+        );
+        let creature = load_creature(&path).expect("scene cruiser loads");
+
+        assert!(creature.is_scene_cruiser());
+        assert_eq!(creature.scene_cruiser_count_max(), Some(3));
+    }
+
+    #[test]
+    fn annotated_pose_nodes_form_art_variant_groups() {
+        let path = write_test_creature(
+            "art-variants",
+            r####"
+name "art-variants"
+
+(short)face ###"""
+s0
+"""###
+
+(short)face1 ###"""
+s1
+"""###
+
+(tall)face ###"""
+t0
+"""###
+
+(tall)face1 ###"""
+t1
+"""###
+"####,
+        );
+        let creature = load_creature(&path).expect("art variant creature loads");
+
+        assert_eq!(creature.art_variant_count, 2);
+        assert_eq!(
+            creature
+                .best_variant_for(0, PoseIntent::Lateral, 0, 0, 0)
+                .art,
+            vec!["s0".to_string()]
+        );
+        assert_eq!(
+            creature
+                .best_variant_for(0, PoseIntent::Lateral, 3, 0, 0)
+                .art,
+            vec!["s1".to_string()]
+        );
+        assert_eq!(
+            creature
+                .best_variant_for(0, PoseIntent::Lateral, 0, 0, 1)
+                .art,
+            vec!["t0".to_string()]
+        );
+        assert_eq!(
+            creature
+                .best_variant_for(0, PoseIntent::Lateral, 3, 0, 1)
+                .art,
+            vec!["t1".to_string()]
+        );
+    }
+
+    #[test]
     fn explicit_zero_creature_count_means_spawn_only() {
         let path = write_test_creature(
             "zero-count",
@@ -1558,7 +1760,7 @@ face ###"""
         assert_eq!(entity.animation_tick_for(&wigglewort, 99), 99);
         assert_eq!(
             wigglewort
-                .best_variant_for(0, PoseIntent::Lateral, 3, entity.phase)
+                .best_variant_for(0, PoseIntent::Lateral, 3, entity.phase, entity.art_variant)
                 .pose,
             "face1"
         );
@@ -1573,7 +1775,13 @@ face ###"""
         assert_eq!(entity.pose_dx_for(&squeeb), 0);
         assert_eq!(
             squeeb
-                .best_variant_for(entity.pose_dx_for(&squeeb), PoseIntent::Lateral, 0, 0)
+                .best_variant_for(
+                    entity.pose_dx_for(&squeeb),
+                    PoseIntent::Lateral,
+                    0,
+                    0,
+                    entity.art_variant,
+                )
                 .pose,
             "face"
         );
@@ -1581,7 +1789,13 @@ face ###"""
         entity.dx = -1;
         assert_eq!(
             squeeb
-                .best_variant_for(entity.pose_dx_for(&squeeb), PoseIntent::Lateral, 0, 0)
+                .best_variant_for(
+                    entity.pose_dx_for(&squeeb),
+                    PoseIntent::Lateral,
+                    0,
+                    0,
+                    entity.art_variant,
+                )
                 .pose,
             "left-drag"
         );
@@ -1589,7 +1803,13 @@ face ###"""
         entity.dx = 1;
         assert_eq!(
             squeeb
-                .best_variant_for(entity.pose_dx_for(&squeeb), PoseIntent::Lateral, 0, 0)
+                .best_variant_for(
+                    entity.pose_dx_for(&squeeb),
+                    PoseIntent::Lateral,
+                    0,
+                    0,
+                    entity.art_variant,
+                )
                 .pose,
             "right-drag"
         );
@@ -1628,19 +1848,19 @@ face ###"""
 
         assert!(
             boxfish
-                .best_variant_for(0, PoseIntent::Face, 0, 0)
+                .best_variant_for(0, PoseIntent::Face, 0, 0, 0)
                 .pose
                 .starts_with("face")
         );
         assert!(
             !boxfish
-                .best_variant_for(0, PoseIntent::Face, 0, 0)
+                .best_variant_for(0, PoseIntent::Face, 0, 0, 0)
                 .pose
                 .starts_with("face-away")
         );
         assert!(
             boxfish
-                .best_variant_for(0, PoseIntent::FaceAway, 0, 0)
+                .best_variant_for(0, PoseIntent::FaceAway, 0, 0, 0)
                 .pose
                 .starts_with("face-away")
         );
@@ -1657,7 +1877,7 @@ face ###"""
     #[test]
     fn parses_school_local_brownian_units() {
         let squigs = load_creature(Path::new("art/creatures/squigs.kdl")).expect("squigs loads");
-        let variant = squigs.best_variant_for(0, PoseIntent::Face, 0, 0);
+        let variant = squigs.best_variant_for(0, PoseIntent::Face, 0, 0, 0);
         let school = variant.school.as_ref().expect("squigs has school units");
 
         assert!(squigs.brownian);
@@ -1752,6 +1972,7 @@ o o
             dy: 0,
             animation_frame_tick: 0,
             phase: 0,
+            art_variant: 0,
             color: Color::White,
             respawn_at: None,
             pose_intent: PoseIntent::Lateral,
