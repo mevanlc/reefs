@@ -1,0 +1,219 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Release version to validate against Cargo.toml (for example 1.2.3)
+        required: true
+        type: string
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    outputs:
+      release_version: ${{ steps.resolve-version.outputs.release_version }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Validate manifest placeholder
+        run: |
+          CARGO_VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          if [ "$CARGO_VERSION" != "0.0.0" ]; then
+            echo "::error::Expected Cargo.toml to remain at placeholder version 0.0.0, found $CARGO_VERSION"
+            exit 1
+          fi
+
+          LOCK_VERSION=$(awk '
+            /^\[\[package\]\]$/ { in_package = 1; name = ""; version = ""; next }
+            in_package && /^name = "reefs"$/ { name = "reefs"; next }
+            in_package && /^version = / { version = $0; sub(/^version = "/, "", version); sub(/"$/, "", version) }
+            in_package && name == "reefs" && version != "" { print version; exit }
+          ' Cargo.lock)
+
+          if [ "$LOCK_VERSION" != "0.0.0" ]; then
+            echo "::error::Expected Cargo.lock reefs version to remain at placeholder 0.0.0, found $LOCK_VERSION"
+            exit 1
+          fi
+
+          echo "Manifest placeholder validated: $CARGO_VERSION"
+
+      - name: Resolve release version
+        id: resolve-version
+        shell: bash
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = "push" ]; then
+            RAW_VERSION="$GITHUB_REF_NAME"
+          else
+            RAW_VERSION="$INPUT_VERSION"
+          fi
+
+          RELEASE_VERSION="${RAW_VERSION#v}"
+          if [[ ! "$RELEASE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Release version must match X.Y.Z; got '$RAW_VERSION'"
+            exit 1
+          fi
+
+          {
+            echo "release_version=$RELEASE_VERSION"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "Resolved release version: $RELEASE_VERSION"
+
+  build:
+    needs: validate
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            cross: false
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            cross: true
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            cross: false
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            cross: false
+          - target: aarch64-linux-android
+            os: ubuntu-latest
+            cross: true
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            cross: false
+          - target: aarch64-pc-windows-msvc
+            os: windows-latest
+            cross: false
+
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Stamp Cargo package version
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ needs.validate.outputs.release_version }}
+        run: |
+          if command -v python3 >/dev/null 2>&1; then
+            PYTHON=python3
+          elif command -v python >/dev/null 2>&1; then
+            PYTHON=python
+          else
+            echo "::error::Expected python3 or python to be available for release version stamping"
+            exit 1
+          fi
+
+          "$PYTHON" - <<'PY'
+          from pathlib import Path
+          import os
+          import re
+
+          release_version = os.environ["RELEASE_VERSION"]
+          cargo_toml = Path("Cargo.toml")
+          original = cargo_toml.read_text()
+          updated, count = re.subn(
+              r'(?m)^version\s*=\s*"0\.0\.0"$',
+              f'version = "{release_version}"',
+              original,
+              count=1,
+          )
+          if count != 1:
+              raise SystemExit(
+                  "Expected exactly one placeholder version entry in Cargo.toml"
+              )
+          cargo_toml.write_text(updated)
+
+          cargo_lock = Path("Cargo.lock")
+          original = cargo_lock.read_text()
+          updated, count = re.subn(
+              r'(?ms)(\[\[package\]\]\nname = "reefs"\nversion = ")0\.0\.0(")',
+              rf"\g<1>{release_version}\2",
+              original,
+              count=1,
+          )
+          if count != 1:
+              raise SystemExit(
+                  "Expected exactly one placeholder version entry for reefs in Cargo.lock"
+              )
+          cargo_lock.write_text(updated)
+          PY
+          grep '^version' Cargo.toml
+          grep -A2 '^name = "reefs"$' Cargo.lock
+
+      - name: Install Rust
+        run: |
+          rustup update stable
+          rustup default stable
+          rustup target add ${{ matrix.target }}
+
+      - name: Install cross
+        if: matrix.cross
+        run: cargo install cross --git https://github.com/cross-rs/cross
+
+      - name: Build
+        run: |
+          ${{ matrix.cross && 'cross' || 'cargo' }} build --release --locked --target ${{ matrix.target }}
+
+      - name: Package (unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          PACKAGE_DIR="package/reefs-${{ matrix.target }}"
+          mkdir -p "$PACKAGE_DIR"
+          cp "target/${{ matrix.target }}/release/reefs" "$PACKAGE_DIR/"
+          cp README.md LICENSE.txt config.kdl "$PACKAGE_DIR/"
+          cp -R art "$PACKAGE_DIR/"
+          tar czf "reefs-${{ matrix.target }}.tar.gz" -C package "reefs-${{ matrix.target }}"
+
+      - name: Package (windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          PACKAGE_DIR="package/reefs-${{ matrix.target }}"
+          mkdir -p "$PACKAGE_DIR"
+          cp "target/${{ matrix.target }}/release/reefs.exe" "$PACKAGE_DIR/"
+          cp README.md LICENSE.txt config.kdl "$PACKAGE_DIR/"
+          cp -R art "$PACKAGE_DIR/"
+          cd package
+          7z a "../reefs-${{ matrix.target }}.zip" "reefs-${{ matrix.target }}"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: reefs-${{ matrix.target }}
+          path: reefs-${{ matrix.target }}.*
+
+  release:
+    needs: build
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v8
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Create draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --draft \
+            --generate-notes \
+            --title "$GITHUB_REF_NAME" \
+            artifacts/*
