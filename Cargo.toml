@@ -9,3 +9,6 @@ crossterm = "0.29.0"
 kdl = "6.5.0"
 rand = "0.10.1"
 ratatui = "0.30.0"
+
+[build-dependencies]
+winresource = "0.1.22"

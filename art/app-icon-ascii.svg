@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+  <title>Reefs ASCII app icon</title>
+  <desc>A monospace ASCII-art reef icon using waves, swimmer marks, an at sign, and a reef floor.</desc>
+  <g transform="scale(0.5)">
+  <rect x="48" y="48" width="928" height="928" rx="190" ry="190" style="fill:#071f2f;stroke:none"/>
+
+  <g font-family="Meslo LG S DZ, ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, Liberation Mono, Courier New, monospace"
+     font-size="230"
+     font-weight="800"
+     text-anchor="middle"
+     dominant-baseline="middle"
+     transform="translate(0 40)">
+    <text x="512" y="218" letter-spacing="6">
+      <tspan fill="#1f7fd1">~</tspan><tspan fill="#86d6ff">~</tspan><tspan fill="#1f7fd1">~</tspan><tspan fill="#86d6ff">~</tspan><tspan fill="#1f7fd1">~</tspan>
+    </text>
+
+    <text x="580" y="415" letter-spacing="-26">
+      <tspan fill="#ffd84a">/</tspan><tspan fill="#b98028" font-size="275" dy="-12">'</tspan><tspan fill="#ffd84a" dy="12">-</tspan>
+    </text>
+
+    <text x="447" y="610" fill="#ffd84a">@</text>
+
+    <text x="512" y="830" letter-spacing="2">
+      <tspan fill="#49a35a">-</tspan><tspan fill="#14512b">.</tspan><tspan fill="#49a35a">-</tspan><tspan fill="#14512b">.</tspan><tspan fill="#49a35a">-</tspan>
+    </text>
+  </g>
+  </g>
+</svg>
